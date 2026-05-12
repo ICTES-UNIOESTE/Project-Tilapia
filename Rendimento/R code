@@ -1,0 +1,875 @@
+# ============================================================
+# Tilápias — análise histórica de CPUE e rendimento no reservatório de Itaipu
+#
+# Dados usados:
+#   - Todos os arquivos Rendimento YYYY.xlsx ou Rendimento YYYY.xlsm
+#     disponíveis em:
+#     C:/Users/lg_ri/Desktop/Monitoramento Tilapia/Dados rendimento
+#
+# Colunas obrigatórias:
+#   - ESPECIE
+#   - SEMANATOT
+#   - DIASTOT
+#
+# Colunas opcionais:
+#   - DATA
+#   - ZONA
+#   - AREA
+#   - PONTO
+#   - PESCADOR_COD
+#
+# CPUE:
+#   - Calculada como:
+#     CPUE = SEMANATOT / DIASTOT
+#
+# Ajustes:
+#   - ZONA padronizada: Lacustre, Fluvial, Transição, Montante
+#   - Gráficos temporais iniciam em 1988
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(readxl)
+  library(janitor)
+  library(dplyr)
+  library(tidyr)
+  library(purrr)
+  library(stringr)
+  library(stringi)
+  library(lubridate)
+  library(ggplot2)
+  library(forcats)
+  library(scales)
+  library(readr)
+  library(writexl)
+})
+
+# ======================
+# 1. Caminhos
+# ======================
+
+pasta <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/Dados rendimento"
+
+out_dir <- file.path(pasta, "saidas_tilapias_cpue_semanatot_diastot")
+dir.create(out_dir, showWarnings = FALSE)
+dir.create(file.path(out_dir, "figuras"), showWarnings = FALSE)
+dir.create(file.path(out_dir, "tabelas"), showWarnings = FALSE)
+
+# ======================
+# 2. Funções auxiliares
+# ======================
+
+limpar_texto <- function(x) {
+  x %>%
+    as.character() %>%
+    str_squish() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_lower() %>%
+    str_replace_all("\\s+", " ")
+}
+
+padronizar_zona <- function(x) {
+  x_chr <- as.character(x) %>% str_squish()
+  x_clean <- limpar_texto(x_chr)
+  
+  case_when(
+    is.na(x_chr) | x_chr == "" ~ "Não informado",
+    x_clean == "lacustre" ~ "Lacustre",
+    x_clean == "fluvial" ~ "Fluvial",
+    x_clean == "transicao" ~ "Transição",
+    x_clean == "transição" ~ "Transição",
+    x_clean == "montante" ~ "Montante",
+    x_clean == "nao informado" ~ "Não informado",
+    TRUE ~ str_to_title(x_chr)
+  )
+}
+
+to_number <- function(x) {
+  x_clean <- x %>%
+    as.character() %>%
+    str_squish() %>%
+    str_replace_all(",", ".")
+  
+  readr::parse_number(
+    x_clean,
+    locale = readr::locale(decimal_mark = "."),
+    na = c("", "-", "--", "NA", "NaN", "na", "nan", "f", "F")
+  )
+}
+
+parse_data_robusta <- function(v) {
+  v_chr <- as.character(v) %>% str_squish()
+  
+  v_chr[v_chr == ""] <- NA_character_
+  v_chr[tolower(v_chr) %in% c("na", "nan", "null")] <- NA_character_
+  
+  d <- rep(as.Date(NA), length(v_chr))
+  
+  idx_valid <- !is.na(v_chr)
+  d[idx_valid] <- suppressWarnings(lubridate::dmy(v_chr[idx_valid]))
+  
+  idx_num <- is.na(d) & !is.na(v_chr) & grepl("^\\d+(\\.0)?$", v_chr)
+  if (any(idx_num, na.rm = TRUE)) {
+    d[idx_num] <- as.Date(as.numeric(v_chr[idx_num]), origin = "1899-12-30")
+  }
+  
+  idx_ymd <- is.na(d) & !is.na(v_chr)
+  if (any(idx_ymd, na.rm = TRUE)) {
+    d[idx_ymd] <- suppressWarnings(lubridate::ymd(v_chr[idx_ymd]))
+  }
+  
+  idx_periodo <- is.na(d) &
+    !is.na(v_chr) &
+    stringr::str_detect(v_chr, "\\d{1,2}/\\d{1,2}/\\d{2,4}")
+  
+  if (any(idx_periodo, na.rm = TRUE)) {
+    primeira_data <- stringr::str_extract(
+      v_chr[idx_periodo],
+      "\\d{1,2}/\\d{1,2}/\\d{2,4}"
+    )
+    
+    d[idx_periodo] <- suppressWarnings(lubridate::dmy(primeira_data))
+  }
+  
+  d
+}
+
+nome_mes_pt <- function(mes_num) {
+  factor(
+    mes_num,
+    levels = 1:12,
+    labels = c(
+      "Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+      "Jul", "Ago", "Set", "Out", "Nov", "Dez"
+    )
+  )
+}
+
+identificar_tilapia <- function(especie_limpa) {
+  str_detect(
+    especie_limpa,
+    paste0(
+      "\\btilapia\\b|\\btilapias\\b|",
+      "\\btilap\\b|^tilap|",
+      "\\btila\\b|^tila$|",
+      "\\btil\\b|^til$|",
+      "\\boreochromis\\b|\\bniloticus\\b|\\bnilotic\\b|",
+      "\\bcoptodon\\b|\\brendalli\\b|\\brendali\\b|\\brendal\\b"
+    )
+  )
+}
+
+tema <- theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+
+# ======================
+# 3. Ler um arquivo Rendimento YYYY
+# ======================
+
+ler_rendimento_ano <- function(arquivo) {
+  
+  ano_file <- str_extract(basename(arquivo), "\\d{4}") %>% as.integer()
+  abas <- readxl::excel_sheets(arquivo)
+  
+  aba_escolhida <- case_when(
+    any(limpar_texto(abas) == "revisado") ~ abas[limpar_texto(abas) == "revisado"][1],
+    any(str_detect(limpar_texto(abas), "banco de dados")) ~ abas[str_detect(limpar_texto(abas), "banco de dados")][1],
+    any(str_detect(limpar_texto(abas), "rendimento")) ~ abas[str_detect(limpar_texto(abas), "rendimento")][1],
+    TRUE ~ abas[1]
+  )
+  
+  df <- suppressWarnings(readxl::read_excel(arquivo, sheet = aba_escolhida)) %>%
+    janitor::clean_names()
+  
+  df <- df %>%
+    rename(
+      especie = any_of(c(
+        "especie",
+        "especies",
+        "esp_cie",
+        "esp_cies",
+        "species"
+      )),
+      semanatot = any_of(c(
+        "semanatot",
+        "semana_tot",
+        "semana_total",
+        "total_semana",
+        "peso_semana",
+        "peso_total",
+        "kg",
+        "quilograma"
+      )),
+      diastot = any_of(c(
+        "diastot",
+        "dias_tot",
+        "dias_total",
+        "total_dias",
+        "dias",
+        "n_dias"
+      )),
+      data = any_of(c(
+        "data",
+        "date",
+        "periodo",
+        "per_odo"
+      )),
+      zona = any_of(c(
+        "zona",
+        "zona_de_pesca",
+        "zona_pesca",
+        "regiao",
+        "regi_o"
+      )),
+      area = any_of(c(
+        "area",
+        "area_de_pesca",
+        "area_pesca"
+      )),
+      ponto = any_of(c(
+        "ponto",
+        "ponto_",
+        "ponto_de_pesca",
+        "ponto_pesca"
+      )),
+      pescador_cod = any_of(c(
+        "pescador_cod",
+        "pescador_codigo",
+        "pescador_c_digo",
+        "codigo_pescador",
+        "cod_pescador"
+      ))
+    )
+  
+  # Apenas estas três colunas são obrigatórias
+  if (!all(c("especie", "semanatot", "diastot") %in% names(df))) {
+    warning(
+      "Arquivo ignorado porque a aba selecionada em ", basename(arquivo),
+      " não possui as colunas mínimas esperadas: ESPECIE, SEMANATOT e DIASTOT."
+    )
+    return(NULL)
+  }
+  
+  # Colunas opcionais
+  if (!"data" %in% names(df)) df$data <- NA_character_
+  if (!"zona" %in% names(df)) df$zona <- NA_character_
+  if (!"area" %in% names(df)) df$area <- NA_character_
+  if (!"ponto" %in% names(df)) df$ponto <- NA_character_
+  if (!"pescador_cod" %in% names(df)) df$pescador_cod <- NA_character_
+  
+  df %>%
+    transmute(
+      ano = ano_file,
+      arquivo = basename(arquivo),
+      caminho_arquivo = arquivo,
+      aba = aba_escolhida,
+      
+      data_original = as.character(data),
+      data = parse_data_robusta(data),
+      mes_num = month(data),
+      mes_nome = nome_mes_pt(mes_num),
+      
+      especie_original = as.character(especie) %>% str_squish(),
+      especie_limpa = limpar_texto(especie_original),
+      
+      zona = padronizar_zona(zona),
+      
+      area = as.character(area) %>% str_squish(),
+      area = ifelse(is.na(area) | area == "", "Não informado", area),
+      
+      ponto = as.character(ponto) %>% str_squish(),
+      ponto = ifelse(is.na(ponto) | ponto == "", "Não informado", ponto),
+      
+      pescador_cod = as.character(pescador_cod) %>% str_squish(),
+      
+      semanatot = to_number(semanatot),
+      diastot = to_number(diastot),
+      
+      cpue = ifelse(
+        !is.na(semanatot) & !is.na(diastot) & diastot > 0,
+        semanatot / diastot,
+        NA_real_
+      ),
+      
+      is_tilapia = identificar_tilapia(especie_limpa)
+    )
+}
+
+# ======================
+# 4. Localizar e ler todos os arquivos Rendimento YYYY
+# ======================
+
+arquivos_rendimento <- list.files(
+  pasta,
+  pattern = "^Rendimento\\s*\\d{4}\\.(xlsx|xlsm)$",
+  full.names = TRUE,
+  recursive = TRUE,
+  ignore.case = TRUE
+)
+
+arquivos_rendimento <- arquivos_rendimento[
+  str_extract(basename(arquivos_rendimento), "\\d{4}") %>%
+    as.integer() %>%
+    between(1988, 2025)
+]
+
+if (length(arquivos_rendimento) == 0) {
+  stop(
+    "Nenhum arquivo no padrão 'Rendimento YYYY.xlsx' ou 'Rendimento YYYY.xlsm' foi encontrado na pasta ou subpastas."
+  )
+}
+
+dados_rendimento <- purrr::map_dfr(arquivos_rendimento, ler_rendimento_ano)
+
+if (nrow(dados_rendimento) == 0) {
+  stop("Nenhum arquivo de rendimento válido foi lido.")
+}
+
+# ======================
+# 5. Diagnóstico das espécies e filtro de tilápias
+# ======================
+
+diagnostico_especies_rendimento <- dados_rendimento %>%
+  distinct(ano, especie_original, especie_limpa, is_tilapia, arquivo, aba) %>%
+  arrange(ano, especie_limpa)
+
+readr::write_csv(
+  diagnostico_especies_rendimento,
+  file.path(out_dir, "tabelas", "diagnostico_especies_rendimento.csv")
+)
+
+print(diagnostico_especies_rendimento)
+
+rendimento_tilapia <- dados_rendimento %>%
+  filter(is_tilapia)
+
+if (nrow(rendimento_tilapia) == 0) {
+  stop(
+    "Nenhum registro de tilápia foi encontrado. ",
+    "Verifique a tabela 'diagnostico_especies_rendimento.csv' para conferir os nomes/acrônimos em ESPECIE."
+  )
+}
+
+# ======================
+# 6. Funções de resumo
+# ======================
+
+resumir_cpue <- function(.data, ...) {
+  .data %>%
+    group_by(...) %>%
+    summarise(
+      rendimento_total = sum(semanatot, na.rm = TRUE),
+      dias_total = sum(diastot, na.rm = TRUE),
+      
+      cpue_media = mean(cpue, na.rm = TRUE),
+      cpue_dp = sd(cpue, na.rm = TRUE),
+      n_cpue = sum(!is.na(cpue)),
+      cpue_se = ifelse(n_cpue > 1, cpue_dp / sqrt(n_cpue), NA_real_),
+      cpue_lwr = ifelse(is.na(cpue_se), NA_real_, pmax(cpue_media - cpue_se, 0)),
+      cpue_upr = ifelse(is.na(cpue_se), NA_real_, cpue_media + cpue_se),
+      
+      cpue_agregada = ifelse(dias_total > 0, rendimento_total / dias_total, NA_real_),
+      
+      n_registros = n(),
+      n_pescadores = n_distinct(pescador_cod[pescador_cod != "" & !is.na(pescador_cod)]),
+      .groups = "drop"
+    )
+}
+
+# ======================
+# 7. Tabelas resumo
+# ======================
+
+resumo_geral <- rendimento_tilapia %>%
+  summarise(
+    primeiro_ano = min(ano, na.rm = TRUE),
+    ultimo_ano = max(ano, na.rm = TRUE),
+    anos = paste(sort(unique(ano)), collapse = ", "),
+    rendimento_total_tilapia = sum(semanatot, na.rm = TRUE),
+    dias_total_tilapia = sum(diastot, na.rm = TRUE),
+    cpue_agregada_geral = ifelse(
+      dias_total_tilapia > 0,
+      rendimento_total_tilapia / dias_total_tilapia,
+      NA_real_
+    ),
+    cpue_media_geral = mean(cpue, na.rm = TRUE),
+    cpue_dp_geral = sd(cpue, na.rm = TRUE),
+    n_cpue = sum(!is.na(cpue)),
+    cpue_se_geral = ifelse(n_cpue > 1, cpue_dp_geral / sqrt(n_cpue), NA_real_),
+    n_registros = n(),
+    n_zonas = n_distinct(zona[zona != "" & !is.na(zona)]),
+    n_areas = n_distinct(area[area != "" & !is.na(area)]),
+    n_pontos = n_distinct(ponto[ponto != "" & !is.na(ponto)]),
+    n_meses = n_distinct(mes_num[!is.na(mes_num)])
+  )
+
+tab_cpue_ano <- rendimento_tilapia %>%
+  resumir_cpue(ano) %>%
+  arrange(ano)
+
+tab_cpue_mes <- rendimento_tilapia %>%
+  filter(!is.na(mes_num)) %>%
+  resumir_cpue(ano, mes_num, mes_nome) %>%
+  arrange(ano, mes_num)
+
+tab_cpue_zona <- rendimento_tilapia %>%
+  resumir_cpue(ano, zona) %>%
+  arrange(ano, zona)
+
+tab_cpue_zona_mes <- rendimento_tilapia %>%
+  filter(!is.na(mes_num)) %>%
+  resumir_cpue(ano, zona, mes_num, mes_nome) %>%
+  arrange(ano, zona, mes_num)
+
+tab_cpue_area <- rendimento_tilapia %>%
+  resumir_cpue(ano, zona, area) %>%
+  arrange(desc(cpue_media))
+
+tab_cpue_ponto <- rendimento_tilapia %>%
+  resumir_cpue(ano, zona, area, ponto) %>%
+  arrange(desc(cpue_media))
+
+tab_rendimento_ano <- rendimento_tilapia %>%
+  group_by(ano) %>%
+  summarise(
+    rendimento_total = sum(semanatot, na.rm = TRUE),
+    dias_total = sum(diastot, na.rm = TRUE),
+    cpue_agregada = ifelse(dias_total > 0, rendimento_total / dias_total, NA_real_),
+    n_registros = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(ano)
+
+tab_rendimento_mes <- rendimento_tilapia %>%
+  filter(!is.na(mes_num)) %>%
+  group_by(ano, mes_num, mes_nome) %>%
+  summarise(
+    rendimento_total = sum(semanatot, na.rm = TRUE),
+    dias_total = sum(diastot, na.rm = TRUE),
+    cpue_agregada = ifelse(dias_total > 0, rendimento_total / dias_total, NA_real_),
+    n_registros = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(ano, mes_num)
+
+tab_rendimento_zona <- rendimento_tilapia %>%
+  group_by(ano, zona) %>%
+  summarise(
+    rendimento_total = sum(semanatot, na.rm = TRUE),
+    dias_total = sum(diastot, na.rm = TRUE),
+    cpue_agregada = ifelse(dias_total > 0, rendimento_total / dias_total, NA_real_),
+    n_registros = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(ano) %>%
+  mutate(
+    percentual_ano = 100 * rendimento_total / sum(rendimento_total, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+tab_esforco_total <- dados_rendimento %>%
+  group_by(ano) %>%
+  summarise(
+    rendimento_total_todas_especies = sum(semanatot, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+tab_relativo_tilapia_rendimento <- tab_rendimento_ano %>%
+  left_join(tab_esforco_total, by = "ano") %>%
+  mutate(
+    percentual_tilapia_rendimento = 100 * rendimento_total / rendimento_total_todas_especies
+  )
+
+disponibilidade_arquivo <- dados_rendimento %>%
+  group_by(ano, arquivo, aba) %>%
+  summarise(
+    n_registros = n(),
+    n_com_data = sum(!is.na(data)),
+    n_com_zona = sum(zona != "Não informado", na.rm = TRUE),
+    n_tilapia = sum(is_tilapia, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ======================
+# 8. Salvar tabelas
+# ======================
+
+write_xlsx(
+  list(
+    resumo_geral = resumo_geral,
+    cpue_anual = tab_cpue_ano,
+    cpue_mensal = tab_cpue_mes,
+    cpue_zona = tab_cpue_zona,
+    cpue_zona_mes = tab_cpue_zona_mes,
+    cpue_area = tab_cpue_area,
+    cpue_ponto = tab_cpue_ponto,
+    rendimento_anual = tab_rendimento_ano,
+    rendimento_mensal = tab_rendimento_mes,
+    rendimento_zona = tab_rendimento_zona,
+    rendimento_relativo_total = tab_relativo_tilapia_rendimento,
+    disponibilidade_arquivo = disponibilidade_arquivo,
+    diagnostico_especies = diagnostico_especies_rendimento,
+    registros_tilapia = rendimento_tilapia,
+    registros_todos = dados_rendimento
+  ),
+  file.path(out_dir, "tabelas", "tabelas_resumo_tilapias_cpue_semanatot_diastot.xlsx")
+)
+
+# ======================
+# 9. Gráficos de CPUE anual
+# ======================
+
+g_cpue_anual <- tab_cpue_ano %>%
+  filter(!is.na(cpue_media)) %>%
+  ggplot(aes(x = ano, y = cpue_media)) +
+  geom_ribbon(
+    aes(ymin = cpue_lwr, ymax = cpue_upr),
+    alpha = 0.25
+  ) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.3) +
+  scale_x_continuous(
+    limits = c(1988, max(tab_cpue_ano$ano, na.rm = TRUE)),
+    breaks = seq(1988, max(tab_cpue_ano$ano, na.rm = TRUE), by = 2),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    x = "Ano",
+    y = "CPUE média de tilápias (kg/pescador*dia)",
+    title = "Série histórica da CPUE de tilápias",
+    subtitle = "CPUE calculada como SEMANATOT / DIASTOT; faixa sombreada = ± 1 erro padrão"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(out_dir, "figuras", "01_cpue_anual_tilapias.png"),
+  g_cpue_anual,
+  width = 12,
+  height = 5.8,
+  dpi = 300
+)
+
+g_cpue_anual_barras <- tab_cpue_ano %>%
+  filter(!is.na(cpue_media)) %>%
+  ggplot(aes(x = ano, y = cpue_media)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_errorbar(
+    aes(ymin = cpue_lwr, ymax = cpue_upr),
+    width = 0.25
+  ) +
+  scale_x_continuous(
+    limits = c(1988, max(tab_cpue_ano$ano, na.rm = TRUE)),
+    breaks = seq(1988, max(tab_cpue_ano$ano, na.rm = TRUE), by = 2),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    x = "Ano",
+    y = "CPUE média de tilápias (kg/pescador*dia)",
+    title = "CPUE anual de tilápias",
+    subtitle = "Barras de erro representam ± 1 erro padrão"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(out_dir, "figuras", "02_cpue_anual_barras_tilapias.png"),
+  g_cpue_anual_barras,
+  width = 13,
+  height = 5.8,
+  dpi = 300
+)
+
+# ======================
+# 10. Gráficos temporais e espaço-temporais
+# ======================
+
+if (nrow(tab_cpue_mes) > 0) {
+  
+  g_cpue_mensal <- tab_cpue_mes %>%
+    filter(!is.na(cpue_media)) %>%
+    ggplot(aes(x = mes_nome, y = cpue_media, group = factor(ano), color = factor(ano))) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    geom_errorbar(
+      aes(ymin = cpue_lwr, ymax = cpue_upr),
+      width = 0.15
+    ) +
+    labs(
+      x = "Mês",
+      y = "CPUE média de tilápias (kg/pescador*dia)",
+      color = "Ano",
+      title = "Variação mensal da CPUE de tilápias"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(out_dir, "figuras", "03_cpue_mensal_tilapias.png"),
+    g_cpue_mensal,
+    width = 10,
+    height = 5,
+    dpi = 300
+  )
+}
+
+if (nrow(tab_cpue_zona) > 0) {
+  
+  g_cpue_zona <- tab_cpue_zona %>%
+    filter(!is.na(cpue_media)) %>%
+    ggplot(aes(x = zona, y = cpue_media, fill = factor(ano))) +
+    geom_col(position = "dodge", color = "black") +
+    geom_errorbar(
+      aes(ymin = cpue_lwr, ymax = cpue_upr),
+      position = position_dodge(width = 0.9),
+      width = 0.25
+    ) +
+    coord_flip() +
+    labs(
+      x = "Zona",
+      y = "CPUE média de tilápias (kg/pescador*dia)",
+      fill = "Ano",
+      title = "CPUE de tilápias por zona do reservatório"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(out_dir, "figuras", "04_cpue_por_zona_tilapias.png"),
+    g_cpue_zona,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
+  
+  g_heat_cpue_zona_ano <- tab_cpue_zona %>%
+    ggplot(aes(x = factor(ano), y = zona, fill = cpue_media)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = round(cpue_media, 2)), size = 3) +
+    scale_fill_gradient(low = "grey95", high = "grey20") +
+    labs(
+      x = "Ano",
+      y = "Zona",
+      fill = "CPUE média",
+      title = "Padrão espaço-temporal da CPUE de tilápias por zona"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(out_dir, "figuras", "05_heatmap_cpue_zona_ano_tilapias.png"),
+    g_heat_cpue_zona_ano,
+    width = 8,
+    height = 5.5,
+    dpi = 300
+  )
+}
+
+if (nrow(tab_cpue_zona_mes) > 0) {
+  
+  g_heat_cpue_zona_mes <- tab_cpue_zona_mes %>%
+    ggplot(aes(x = mes_nome, y = zona, fill = cpue_media)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = round(cpue_media, 2)), size = 3) +
+    scale_fill_gradient(low = "grey95", high = "grey20") +
+    facet_wrap(~ ano, ncol = 1) +
+    labs(
+      x = "Mês",
+      y = "Zona",
+      fill = "CPUE média",
+      title = "CPUE mensal de tilápias por zona"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(out_dir, "figuras", "06_heatmap_cpue_zona_mes_tilapias.png"),
+    g_heat_cpue_zona_mes,
+    width = 9,
+    height = 8,
+    dpi = 300
+  )
+}
+
+# ======================
+# 11. Gráficos de rendimento
+# ======================
+
+g_rendimento_ano <- tab_rendimento_ano %>%
+  ggplot(aes(x = ano, y = rendimento_total)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_text(
+    aes(label = round(rendimento_total, 1)),
+    vjust = -0.3,
+    size = 3.5
+  ) +
+  scale_x_continuous(
+    limits = c(1987.5, max(tab_rendimento_ano$ano, na.rm = TRUE) + 1),
+    breaks = seq(1988, max(tab_rendimento_ano$ano, na.rm = TRUE), by = 2),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    x = "Ano",
+    y = "Rendimento total de tilápias",
+    title = "Rendimento anual total de tilápias"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(out_dir, "figuras", "07_rendimento_anual_total_tilapias.png"),
+  g_rendimento_ano,
+  width = 12,
+  height = 5.5,
+  dpi = 300
+)
+
+g_rendimento_relativo <- tab_relativo_tilapia_rendimento %>%
+  ggplot(aes(x = ano, y = percentual_tilapia_rendimento)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_text(
+    aes(label = sprintf("%.2f%%", percentual_tilapia_rendimento)),
+    vjust = -0.3,
+    size = 3.5
+  ) +
+  scale_x_continuous(
+  limits = c(1987.5, max(tab_rendimento_ano$ano, na.rm = TRUE) + 1),
+  breaks = seq(1988, max(tab_rendimento_ano$ano, na.rm = TRUE), by = 2),
+  expand = expansion(mult = c(0.01, 0.01))
+  )+
+  scale_y_continuous(
+    labels = function(x) paste0(x, "%"),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(
+    x = "Ano",
+    y = "Participação relativa no rendimento total",
+    title = "Participação das tilápias no rendimento total registrado"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(out_dir, "figuras", "08_participacao_relativa_tilapias_rendimento_total.png"),
+  g_rendimento_relativo,
+  width = 12,
+  height = 5.5,
+  dpi = 300
+)
+
+if (nrow(tab_rendimento_zona) > 0) {
+  
+  g_rendimento_zona <- tab_rendimento_zona %>%
+    ggplot(aes(x = zona, y = rendimento_total, fill = factor(ano))) +
+    geom_col(position = "dodge", color = "black") +
+    coord_flip() +
+    labs(
+      x = "Zona",
+      y = "Rendimento total de tilápias",
+      fill = "Ano",
+      title = "Rendimento de tilápias por zona do reservatório"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(out_dir, "figuras", "09_rendimento_por_zona_tilapias.png"),
+    g_rendimento_zona,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
+}
+
+# ======================
+# 12. Áreas e pontos principais, se disponíveis
+# ======================
+
+if (any(!is.na(tab_cpue_area$area) & tab_cpue_area$area != "Não informado")) {
+  
+  top_areas_cpue <- tab_cpue_area %>%
+    filter(!is.na(cpue_media), n_cpue >= 2) %>%
+    group_by(zona, area) %>%
+    summarise(
+      cpue_media = mean(cpue_media, na.rm = TRUE),
+      rendimento_total = sum(rendimento_total, na.rm = TRUE),
+      n_cpue = sum(n_cpue, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    slice_max(order_by = cpue_media, n = 20, with_ties = FALSE) %>%
+    mutate(area_label = paste0("Área ", area, " — ", zona))
+  
+  g_top_areas_cpue <- top_areas_cpue %>%
+    mutate(area_label = fct_reorder(area_label, cpue_media)) %>%
+    ggplot(aes(x = area_label, y = cpue_media)) +
+    geom_col(fill = "grey60", color = "black") +
+    geom_text(aes(label = round(cpue_media, 2)), hjust = -0.15, size = 3.5) +
+    coord_flip() +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+    labs(
+      x = NULL,
+      y = "CPUE média de tilápias (kg/pescador*dia)",
+      title = "Principais áreas em CPUE média de tilápias"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(out_dir, "figuras", "10_top_areas_cpue_tilapias.png"),
+    g_top_areas_cpue,
+    width = 9,
+    height = 6,
+    dpi = 300
+  )
+}
+
+if (any(!is.na(tab_cpue_ponto$ponto) & tab_cpue_ponto$ponto != "Não informado")) {
+  
+  top_pontos_cpue <- tab_cpue_ponto %>%
+    filter(!is.na(cpue_media), n_cpue >= 2) %>%
+    group_by(zona, area, ponto) %>%
+    summarise(
+      cpue_media = mean(cpue_media, na.rm = TRUE),
+      rendimento_total = sum(rendimento_total, na.rm = TRUE),
+      n_cpue = sum(n_cpue, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    slice_max(order_by = cpue_media, n = 20, with_ties = FALSE) %>%
+    mutate(ponto_label = paste0("Ponto ", ponto, " — Área ", area, " — ", zona))
+  
+  g_top_pontos_cpue <- top_pontos_cpue %>%
+    mutate(ponto_label = fct_reorder(ponto_label, cpue_media)) %>%
+    ggplot(aes(x = ponto_label, y = cpue_media)) +
+    geom_col(fill = "grey60", color = "black") +
+    geom_text(aes(label = round(cpue_media, 2)), hjust = -0.15, size = 3.5) +
+    coord_flip() +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+    labs(
+      x = NULL,
+      y = "CPUE média de tilápias (kg/pescador*dia)",
+      title = "Principais pontos em CPUE média de tilápias"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(out_dir, "figuras", "11_top_pontos_cpue_tilapias.png"),
+    g_top_pontos_cpue,
+    width = 10,
+    height = 7,
+    dpi = 300
+  )
+}
+
+# ======================
+# 13. Imprimir resumos
+# ======================
+
+print(resumo_geral)
+print(tab_cpue_ano)
+print(tab_cpue_zona)
+print(tab_rendimento_ano)
+print(tab_rendimento_zona)
+print(tab_relativo_tilapia_rendimento)
+print(disponibilidade_arquivo)
+
+message("Concluído. Saídas salvas em: ", normalizePath(out_dir, winslash = "\\", mustWork = FALSE))
