@@ -1,0 +1,1019 @@
+# ============================================================
+# Espécies de tilápias — gráficos de estabelecimento, 1988–2025
+# Espécies-alvo:
+#   1) Oreochromis niloticus
+#   2) Coptodon rendalli
+#   3) Ambas as espécies combinadas
+#
+# Lê todos os arquivos Biopesca YYYY.xlsx
+# SEM PESO
+# CT e CP: 0, "-", "--", células vazias e valores inválidos são tratados como NA
+# Figuras em português
+#
+# Nesta versão:
+#   - As tabelas continuam incluindo cada espécie e ambas combinadas
+#   - Os gráficos principais mostram Oreochromis niloticus e Coptodon rendalli lado a lado
+#   - Não são mais geradas figuras independentes por espécie
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(readxl)
+  library(janitor)
+  library(dplyr)
+  library(purrr)
+  library(stringr)
+  library(stringi)
+  library(lubridate)
+  library(ggplot2)
+  library(forcats)
+  library(tidyr)
+  library(scales)
+  library(writexl)
+  library(readr)
+})
+
+# ======================
+# 1. Caminhos
+# ======================
+
+pasta <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/Dados biopesca"
+
+out_dir <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/saidas_tilapias_1988_2025"
+dir.create(out_dir, showWarnings = FALSE)
+dir.create(file.path(out_dir, "figuras"), showWarnings = FALSE)
+dir.create(file.path(out_dir, "tabelas"), showWarnings = FALSE)
+
+comparison_dir <- file.path(out_dir, "figuras", "comparacao_lado_a_lado")
+dir.create(comparison_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ======================
+# 2. Funções auxiliares
+# ======================
+
+parse_data_robusta <- function(v) {
+  v_chr <- as.character(v)
+  v_chr <- stringr::str_squish(v_chr)
+  v_chr[v_chr == ""] <- NA_character_
+  
+  d <- rep(as.Date(NA), length(v_chr))
+  
+  idx_valid <- !is.na(v_chr)
+  d[idx_valid] <- suppressWarnings(lubridate::dmy(v_chr[idx_valid]))
+  
+  idx_num <- is.na(d) & !is.na(v_chr) & grepl("^\\d+(\\.0)?$", v_chr)
+  if (any(idx_num, na.rm = TRUE)) {
+    d[idx_num] <- as.Date(as.numeric(v_chr[idx_num]), origin = "1899-12-30")
+  }
+  
+  idx_ymd <- is.na(d) & !is.na(v_chr)
+  if (any(idx_ymd, na.rm = TRUE)) {
+    d[idx_ymd] <- suppressWarnings(lubridate::ymd(v_chr[idx_ymd]))
+  }
+  
+  d
+}
+
+clean_species_name <- function(x) {
+  x %>%
+    as.character() %>%
+    str_squish() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_lower() %>%
+    str_replace_all("\\s+", " ")
+}
+
+.read_sheet_as_text <- function(path, sheet) {
+  header <- suppressWarnings(readxl::read_excel(path, sheet = sheet, n_max = 0))
+  ncols <- ncol(header)
+  if (is.null(ncols) || ncols == 0) return(NULL)
+  
+  col_types <- rep("text", ncols)
+  suppressWarnings(readxl::read_excel(path, sheet = sheet, col_types = col_types))
+}
+
+to_number <- function(x) {
+  x_clean <- x %>%
+    as.character() %>%
+    str_squish() %>%
+    str_replace_all(",", ".")
+  
+  x_num <- readr::parse_number(
+    x_clean,
+    locale = readr::locale(decimal_mark = "."),
+    na = c("", "-", "--", "NA", "NaN", "na", "nan", "f", "F")
+  )
+  
+  dplyr::if_else(
+    is.na(x_num) | x_num <= 0,
+    NA_real_,
+    x_num
+  )
+}
+
+safe_file_name <- function(x) {
+  x %>%
+    str_replace_all(" ", "_") %>%
+    str_replace_all("[^A-Za-z0-9_]+", "")
+}
+
+pretty_group_label_pt <- function(x) {
+  dplyr::case_when(
+    x == "Oreochromis niloticus" ~ "italic('Oreochromis niloticus')",
+    x == "Coptodon rendalli" ~ "italic('Coptodon rendalli')",
+    x == "Ambas as espécies combinadas" ~ "italic('Oreochromis niloticus')~' + '~italic('Coptodon rendalli')",
+    TRUE ~ paste0("'", x, "'")
+  )
+}
+
+# ======================
+# 3. Ler uma planilha
+# ======================
+
+ler_dado <- function(arq) {
+  
+  ano_file <- str_extract(basename(arq), "\\d{4}") %>% as.integer()
+  
+  shs <- suppressWarnings(readxl::excel_sheets(arq))
+  if (length(shs) == 0) {
+    message("Sem abas legíveis: ", basename(arq))
+    return(NULL)
+  }
+  
+  shs <- shs[!grepl(
+    "^(Gr[aá]f|Gr[aá]fico|Chart|Figura|Object|Grf|Sheet\\d+$)",
+    shs,
+    ignore.case = TRUE
+  )]
+  
+  if (length(shs) == 0) {
+    message("Só havia abas de gráfico/objeto em: ", basename(arq))
+    return(NULL)
+  }
+  
+  for (sh in shs) {
+    
+    df <- purrr::safely(.read_sheet_as_text, otherwise = NULL)(arq, sh)$result
+    if (is.null(df)) next
+    
+    df <- df %>%
+      janitor::clean_names()
+    
+    df <- df %>%
+      rename(
+        DATA = any_of(c(
+          "data", "date", "dt", "data_coleta"
+        )),
+        SPECIES = any_of(c(
+          "species", "especie", "esp_cie", "nome_cientifico",
+          "nome_cientifico_atualizado", "especie_atualizada"
+        )),
+        ESTADIO = any_of(c(
+          "estadio", "estagio", "estágio", "stage",
+          "estadio_gonadal", "estagio_gonadal"
+        )),
+        SEXO = any_of(c(
+          "sexo", "sex"
+        )),
+        CT = any_of(c(
+          "ct", "comprimento_total", "comp_total", "total_length",
+          "lt", "tl"
+        )),
+        CP = any_of(c(
+          "cp", "comprimento_padrao", "comp_padrao", "standard_length",
+          "ls", "sl"
+        )),
+        ZONA = any_of(c(
+          "zona", "zona_de_pesca", "zona_pesca"
+        )),
+        AREA = any_of(c(
+          "area", "regiao", "regiao_pesca"
+        )),
+        PONTO = any_of(c(
+          "ponto", "local", "localidade", "ponto_de_pesca",
+          "ponto_pesca"
+        ))
+      )
+    
+    if (!all(c("DATA", "SPECIES") %in% names(df))) next
+    
+    optional_cols <- c("ESTADIO", "SEXO", "CT", "CP", "ZONA", "AREA", "PONTO")
+    for (cc in optional_cols) {
+      if (!cc %in% names(df)) df[[cc]] <- NA_character_
+    }
+    
+    return(
+      df %>%
+        transmute(
+          DATA,
+          SPECIES,
+          ESTADIO,
+          SEXO,
+          CT,
+          CP,
+          ZONA,
+          AREA,
+          PONTO,
+          ANO = ano_file,
+          .orig_sheet = sh,
+          .orig_file = basename(arq)
+        )
+    )
+  }
+  
+  message("Nenhuma aba com DATA/SPECIES em: ", basename(arq))
+  NULL
+}
+
+# ======================
+# 4. Ler todos os arquivos, 1988–2025
+# ======================
+
+arquivos <- list.files(
+  pasta,
+  pattern = "^Biopesca\\s\\d{4}\\.xlsx$",
+  full.names = TRUE
+)
+
+arquivos <- arquivos[
+  str_extract(basename(arquivos), "\\d{4}") %>%
+    as.integer() %>%
+    between(1988, 2025)
+]
+
+if (length(arquivos) == 0) {
+  stop("Nenhum arquivo chamado 'Biopesca YYYY.xlsx' foi encontrado entre 1988 e 2025.")
+}
+
+dados_lista <- lapply(arquivos, ler_dado) %>%
+  purrr::compact()
+
+if (length(dados_lista) == 0) {
+  stop("Nenhum dado válido foi lido. Verifique se os arquivos possuem colunas DATA e SPECIES/ESPECIE.")
+}
+
+dados <- bind_rows(dados_lista) %>%
+  mutate(
+    DATA = parse_data_robusta(DATA),
+    ANO = ifelse(is.na(ANO), year(DATA), ANO),
+    ANO = as.integer(ANO),
+    MES = month(DATA),
+    
+    SPECIES_ORIGINAL = as.character(SPECIES) %>% str_squish(),
+    SPECIES_CLEAN = clean_species_name(SPECIES),
+    
+    ESTADIO = as.character(ESTADIO) %>%
+      str_squish() %>%
+      stringi::stri_trans_general("Latin-ASCII") %>%
+      str_to_upper(),
+    
+    SEXO = as.character(SEXO) %>%
+      str_squish() %>%
+      stringi::stri_trans_general("Latin-ASCII") %>%
+      str_to_upper(),
+    
+    ZONA = as.character(ZONA) %>% str_squish(),
+    AREA = as.character(AREA) %>% str_squish(),
+    PONTO = as.character(PONTO) %>% str_squish(),
+    
+    CT = to_number(CT),
+    CP = to_number(CP),
+    
+    especie_alvo = case_when(
+      SPECIES_CLEAN %in% c(
+        "oreochromis niloticus",
+        "oreochromis niloticus niloticus"
+      ) ~ "Oreochromis niloticus",
+      
+      SPECIES_CLEAN %in% c(
+        "coptodon rendalli",
+        "coptodon rendali",
+        "tilapia rendalli",
+        "tilapia rendali"
+      ) ~ "Coptodon rendalli",
+      
+      str_detect(SPECIES_CLEAN, "oreochromis\\s+nilotic") ~ "Oreochromis niloticus",
+      str_detect(SPECIES_CLEAN, "coptodon\\s+rendal|coptodon\\s+rendali|tilapia\\s+rendal|tilapia\\s+rendali") ~ "Coptodon rendalli",
+      
+      TRUE ~ NA_character_
+    ),
+    
+    is_alvo = !is.na(especie_alvo)
+  ) %>%
+  filter(
+    !is.na(ANO),
+    ANO >= 1988,
+    ANO <= 2025,
+    !is.na(SPECIES_CLEAN),
+    SPECIES_CLEAN != ""
+  )
+
+# ======================
+# 5. Tabela diagnóstica
+# ======================
+
+diagnostico_tilapias <- dados %>%
+  filter(
+    str_detect(SPECIES_CLEAN, "oreochromis|nilotic|coptodon|rendal|rendali|tilapia")
+  ) %>%
+  count(SPECIES_ORIGINAL, SPECIES_CLEAN, especie_alvo, ANO, name = "n") %>%
+  arrange(SPECIES_CLEAN, ANO)
+
+readr::write_csv(
+  diagnostico_tilapias,
+  file.path(out_dir, "tabelas", "diagnostico_nomes_tilapias.csv")
+)
+
+print(diagnostico_tilapias)
+
+tilapias_individual <- dados %>%
+  filter(is_alvo)
+
+if (nrow(tilapias_individual) == 0) {
+  stop(
+    "Nenhum registro de Oreochromis niloticus ou Coptodon rendalli foi encontrado entre 1988 e 2025. ",
+    "Verifique o arquivo 'diagnostico_nomes_tilapias.csv' na pasta de saída."
+  )
+}
+
+tilapias_ambas <- tilapias_individual %>%
+  mutate(especie_alvo = "Ambas as espécies combinadas")
+
+dados_alvo <- bind_rows(
+  tilapias_individual,
+  tilapias_ambas
+)
+
+niveis_alvo <- c(
+  "Oreochromis niloticus",
+  "Coptodon rendalli",
+  "Ambas as espécies combinadas"
+)
+
+species_individual <- c(
+  "Oreochromis niloticus",
+  "Coptodon rendalli"
+)
+
+dados_alvo <- dados_alvo %>%
+  mutate(especie_alvo = factor(especie_alvo, levels = niveis_alvo))
+
+# ======================
+# 6. Tabelas resumo
+# ======================
+
+resumo_geral <- dados_alvo %>%
+  group_by(especie_alvo) %>%
+  summarise(
+    primeiro_ano = min(ANO, na.rm = TRUE),
+    ultimo_ano = max(ANO, na.rm = TRUE),
+    total_individuos = n(),
+    total_todos_peixes = nrow(dados),
+    abundancia_relativa_percentual = 100 * total_individuos / total_todos_peixes,
+    anos_detectados = n_distinct(ANO),
+    meses_detectados = n_distinct(MES),
+    zonas_detectadas = n_distinct(ZONA[!is.na(ZONA) & ZONA != ""]),
+    pontos_detectados = n_distinct(PONTO[!is.na(PONTO) & PONTO != ""]),
+    .groups = "drop"
+  )
+
+tab_ano <- dados %>%
+  group_by(ANO) %>%
+  summarise(total_peixes = n(), .groups = "drop") %>%
+  tidyr::crossing(especie_alvo = factor(niveis_alvo, levels = niveis_alvo)) %>%
+  left_join(
+    dados_alvo %>%
+      count(especie_alvo, ANO, name = "n_alvo"),
+    by = c("especie_alvo", "ANO")
+  ) %>%
+  mutate(
+    n_alvo = replace_na(n_alvo, 0L),
+    percentual_alvo = 100 * n_alvo / total_peixes
+  ) %>%
+  arrange(especie_alvo, ANO)
+
+tab_ano_mes <- dados %>%
+  filter(!is.na(MES)) %>%
+  group_by(ANO, MES) %>%
+  summarise(total_peixes = n(), .groups = "drop") %>%
+  tidyr::crossing(especie_alvo = factor(niveis_alvo, levels = niveis_alvo)) %>%
+  left_join(
+    dados_alvo %>%
+      filter(!is.na(MES)) %>%
+      count(especie_alvo, ANO, MES, name = "n_alvo"),
+    by = c("especie_alvo", "ANO", "MES")
+  ) %>%
+  mutate(
+    n_alvo = replace_na(n_alvo, 0L),
+    percentual_alvo = 100 * n_alvo / total_peixes,
+    mes_nome = factor(
+      MES,
+      levels = 1:12,
+      labels = c("Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+                 "Jul", "Ago", "Set", "Out", "Nov", "Dez")
+    )
+  ) %>%
+  arrange(especie_alvo, ANO, MES)
+
+tab_mes_todos_anos <- dados %>%
+  filter(!is.na(MES)) %>%
+  group_by(MES) %>%
+  summarise(total_peixes = n(), .groups = "drop") %>%
+  tidyr::crossing(especie_alvo = factor(niveis_alvo, levels = niveis_alvo)) %>%
+  left_join(
+    dados_alvo %>%
+      filter(!is.na(MES)) %>%
+      count(especie_alvo, MES, name = "n_alvo"),
+    by = c("especie_alvo", "MES")
+  ) %>%
+  mutate(
+    n_alvo = replace_na(n_alvo, 0L),
+    percentual_alvo = 100 * n_alvo / total_peixes,
+    mes_nome = factor(
+      MES,
+      levels = 1:12,
+      labels = c("Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+                 "Jul", "Ago", "Set", "Out", "Nov", "Dez")
+    )
+  ) %>%
+  arrange(especie_alvo, MES)
+
+tab_zona <- dados %>%
+  mutate(ZONA = ifelse(is.na(ZONA) | ZONA == "", "Não informado", ZONA)) %>%
+  group_by(ZONA) %>%
+  summarise(total_peixes = n(), .groups = "drop") %>%
+  tidyr::crossing(especie_alvo = factor(niveis_alvo, levels = niveis_alvo)) %>%
+  left_join(
+    dados_alvo %>%
+      mutate(ZONA = ifelse(is.na(ZONA) | ZONA == "", "Não informado", ZONA)) %>%
+      count(especie_alvo, ZONA, name = "n_alvo"),
+    by = c("especie_alvo", "ZONA")
+  ) %>%
+  mutate(
+    n_alvo = replace_na(n_alvo, 0L),
+    percentual_alvo = 100 * n_alvo / total_peixes
+  ) %>%
+  arrange(especie_alvo, desc(n_alvo))
+
+tab_ponto <- dados %>%
+  mutate(
+    ZONA = ifelse(is.na(ZONA) | ZONA == "", "Não informado", ZONA),
+    PONTO = ifelse(is.na(PONTO) | PONTO == "", "Não informado", PONTO)
+  ) %>%
+  group_by(ZONA, PONTO) %>%
+  summarise(total_peixes = n(), .groups = "drop") %>%
+  tidyr::crossing(especie_alvo = factor(niveis_alvo, levels = niveis_alvo)) %>%
+  left_join(
+    dados_alvo %>%
+      mutate(
+        ZONA = ifelse(is.na(ZONA) | ZONA == "", "Não informado", ZONA),
+        PONTO = ifelse(is.na(PONTO) | PONTO == "", "Não informado", PONTO)
+      ) %>%
+      count(especie_alvo, ZONA, PONTO, name = "n_alvo"),
+    by = c("especie_alvo", "ZONA", "PONTO")
+  ) %>%
+  mutate(
+    n_alvo = replace_na(n_alvo, 0L),
+    percentual_alvo = 100 * n_alvo / total_peixes
+  ) %>%
+  filter(n_alvo > 0) %>%
+  arrange(especie_alvo, desc(n_alvo))
+
+tab_sexo <- dados_alvo %>%
+  mutate(SEXO = ifelse(is.na(SEXO) | SEXO == "", "Não informado", SEXO)) %>%
+  count(especie_alvo, SEXO, name = "n") %>%
+  group_by(especie_alvo) %>%
+  mutate(percentual = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  arrange(especie_alvo, desc(n))
+
+tab_estadio <- dados_alvo %>%
+  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "Não informado", ESTADIO)) %>%
+  count(especie_alvo, ESTADIO, name = "n") %>%
+  group_by(especie_alvo) %>%
+  mutate(percentual = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  arrange(especie_alvo, desc(n))
+
+tab_estadio_ano <- dados_alvo %>%
+  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "Não informado", ESTADIO)) %>%
+  count(especie_alvo, ANO, ESTADIO, name = "n") %>%
+  group_by(especie_alvo, ANO) %>%
+  mutate(percentual = 100 * n / sum(n)) %>%
+  ungroup()
+
+tab_tamanho_resumo <- dados_alvo %>%
+  group_by(especie_alvo) %>%
+  summarise(
+    n = n(),
+    
+    n_ct = sum(!is.na(CT)),
+    ct_media = mean(CT, na.rm = TRUE),
+    ct_dp = sd(CT, na.rm = TRUE),
+    ct_min = min(CT, na.rm = TRUE),
+    ct_max = max(CT, na.rm = TRUE),
+    
+    n_cp = sum(!is.na(CP)),
+    cp_media = mean(CP, na.rm = TRUE),
+    cp_dp = sd(CP, na.rm = TRUE),
+    cp_min = min(CP, na.rm = TRUE),
+    cp_max = max(CP, na.rm = TRUE),
+    
+    .groups = "drop"
+  )
+
+write_xlsx(
+  list(
+    resumo_geral = resumo_geral,
+    abundancia_anual = tab_ano,
+    abundancia_anual_mensal = tab_ano_mes,
+    abundancia_mensal_todos_anos = tab_mes_todos_anos,
+    abundancia_por_zona = tab_zona,
+    abundancia_por_ponto = tab_ponto,
+    sexo = tab_sexo,
+    estadio_reprodutivo = tab_estadio,
+    estadio_reprodutivo_por_ano = tab_estadio_ano,
+    resumo_tamanho = tab_tamanho_resumo,
+    registros_especies_alvo = dados_alvo,
+    diagnostico_nomes = diagnostico_tilapias
+  ),
+  file.path(out_dir, "tabelas", "tabelas_resumo_tilapias_1988_2025.xlsx")
+)
+
+# ======================
+# 7. Tema
+# ======================
+
+tema <- theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    strip.text = element_text(face = "italic", size = 11)
+  )
+
+# ============================================================
+# 8. Gráficos lado a lado entre espécies
+# ============================================================
+
+# ----------------------
+# Gráfico 1 — Número anual
+# ----------------------
+
+g_ano_n_side <- tab_ano %>%
+  filter(especie_alvo %in% species_individual) %>%
+  ggplot(aes(x = ANO, y = n_alvo)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_line(aes(group = 1), linewidth = 0.7) +
+  geom_point(size = 2) +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_x_continuous(
+    breaks = seq(1988, 2025, by = 2),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(
+    x = "Ano",
+    y = "Número de indivíduos",
+    title = "Abundância anual das espécies-alvo de tilápia"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(comparison_dir, "01_numero_anual_lado_a_lado.png"),
+  g_ano_n_side, width = 13, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 2 — Abundância relativa anual
+# ----------------------
+
+g_ano_rel_side <- tab_ano %>%
+  filter(especie_alvo %in% species_individual) %>%
+  ggplot(aes(x = ANO, y = percentual_alvo)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_line(aes(group = 1), linewidth = 0.7) +
+  geom_point(size = 2) +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_x_continuous(
+    breaks = seq(1988, 2025, by = 2),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_y_continuous(
+    labels = function(x) paste0(x, "%"),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(
+    x = "Ano",
+    y = "Abundância relativa",
+    title = "Abundância relativa anual das espécies-alvo de tilápia"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(comparison_dir, "02_abundancia_relativa_anual_lado_a_lado.png"),
+  g_ano_rel_side, width = 13, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 3 — Número acumulado
+# ----------------------
+
+g_acumulado_side <- tab_ano %>%
+  filter(especie_alvo %in% species_individual) %>%
+  group_by(especie_alvo) %>%
+  arrange(ANO, .by_group = TRUE) %>%
+  mutate(n_acumulado = cumsum(n_alvo)) %>%
+  ungroup() %>%
+  ggplot(aes(x = ANO, y = n_acumulado)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_x_continuous(
+    breaks = seq(1988, 2025, by = 2),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    x = "Ano",
+    y = "Número acumulado de indivíduos",
+    title = "Registros acumulados das espécies-alvo de tilápia"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(comparison_dir, "03_numero_acumulado_lado_a_lado.png"),
+  g_acumulado_side, width = 13, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 4 — Heatmap mês x ano
+# ----------------------
+
+g_heat_ano_mes_side <- tab_ano_mes %>%
+  filter(especie_alvo %in% species_individual) %>%
+  ggplot(aes(x = ANO, y = mes_nome, fill = n_alvo)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "grey95", high = "grey20") +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_x_continuous(
+    breaks = seq(1988, 2025, by = 2),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Ano",
+    y = "Mês",
+    fill = "N",
+    title = "Ocorrência temporal das espécies-alvo de tilápia por mês e ano"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(comparison_dir, "04_heatmap_mes_ano_lado_a_lado.png"),
+  g_heat_ano_mes_side, width = 14, height = 5.8, dpi = 300
+)
+
+# ----------------------
+# Gráfico 5 — Número mensal ao longo de todos os anos
+# ----------------------
+
+g_mes_todos_side <- tab_mes_todos_anos %>%
+  filter(especie_alvo %in% species_individual) %>%
+  ggplot(aes(x = mes_nome, y = n_alvo)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_text(aes(label = n_alvo), vjust = -0.3, size = 3.2) +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    x = "Mês",
+    y = "Número de indivíduos",
+    title = "Abundância mensal das espécies-alvo de tilápia, 1988–2025"
+  ) +
+  tema
+
+ggsave(
+  file.path(comparison_dir, "05_numero_mensal_lado_a_lado.png"),
+  g_mes_todos_side, width = 12, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 6 — Número por zona
+# ----------------------
+
+g_zona_n_side <- tab_zona %>%
+  filter(especie_alvo %in% species_individual) %>%
+  group_by(especie_alvo) %>%
+  mutate(ZONA = fct_reorder(ZONA, n_alvo)) %>%
+  ungroup() %>%
+  ggplot(aes(x = ZONA, y = n_alvo)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_text(aes(label = n_alvo), hjust = -0.15, size = 3.2) +
+  coord_flip() +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(
+    x = NULL,
+    y = "Número de indivíduos",
+    title = "Abundância das espécies-alvo de tilápia por zona"
+  ) +
+  tema
+
+ggsave(
+  file.path(comparison_dir, "06_numero_por_zona_lado_a_lado.png"),
+  g_zona_n_side, width = 12, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 7 — Abundância relativa por zona
+# ----------------------
+
+g_zona_rel_side <- tab_zona %>%
+  filter(especie_alvo %in% species_individual) %>%
+  group_by(especie_alvo) %>%
+  mutate(ZONA = fct_reorder(ZONA, percentual_alvo)) %>%
+  ungroup() %>%
+  ggplot(aes(x = ZONA, y = percentual_alvo)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_text(
+    aes(label = sprintf("%.2f%%", percentual_alvo)),
+    hjust = -0.15,
+    size = 3.2
+  ) +
+  coord_flip() +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_y_continuous(
+    labels = function(x) paste0(x, "%"),
+    expand = expansion(mult = c(0, 0.22))
+  ) +
+  labs(
+    x = NULL,
+    y = "Abundância relativa",
+    title = "Abundância relativa das espécies-alvo de tilápia por zona"
+  ) +
+  tema
+
+ggsave(
+  file.path(comparison_dir, "07_abundancia_relativa_por_zona_lado_a_lado.png"),
+  g_zona_rel_side, width = 12, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 8 — Composição por sexo
+# ----------------------
+
+g_sexo_side <- tab_sexo %>%
+  filter(especie_alvo %in% species_individual) %>%
+  group_by(especie_alvo) %>%
+  mutate(SEXO = fct_reorder(SEXO, n)) %>%
+  ungroup() %>%
+  ggplot(aes(x = SEXO, y = n)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_text(
+    aes(label = paste0(n, " (", sprintf("%.1f", percentual), "%)")),
+    hjust = -0.1,
+    size = 3.2
+  ) +
+  coord_flip() +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
+  labs(
+    x = "Sexo",
+    y = "Número de indivíduos",
+    title = "Composição por sexo das espécies-alvo de tilápia"
+  ) +
+  tema
+
+ggsave(
+  file.path(comparison_dir, "08_composicao_por_sexo_lado_a_lado.png"),
+  g_sexo_side, width = 12, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 9 — Estágio reprodutivo
+# ----------------------
+
+g_estadio_side <- tab_estadio %>%
+  filter(especie_alvo %in% species_individual) %>%
+  group_by(especie_alvo) %>%
+  mutate(ESTADIO = fct_reorder(ESTADIO, n)) %>%
+  ungroup() %>%
+  ggplot(aes(x = ESTADIO, y = n)) +
+  geom_col(fill = "grey60", color = "black") +
+  geom_text(
+    aes(label = paste0(n, " (", sprintf("%.1f", percentual), "%)")),
+    hjust = -0.1,
+    size = 3.2
+  ) +
+  coord_flip() +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
+  labs(
+    x = "Estágio reprodutivo",
+    y = "Número de indivíduos",
+    title = "Estágios reprodutivos das espécies-alvo de tilápia"
+  ) +
+  tema
+
+ggsave(
+  file.path(comparison_dir, "09_estagio_reprodutivo_lado_a_lado.png"),
+  g_estadio_side, width = 12, height = 5.5, dpi = 300
+)
+
+# ----------------------
+# Gráfico 10 — Estágio reprodutivo por ano
+# ----------------------
+
+g_estadio_ano_side <- tab_estadio_ano %>%
+  filter(especie_alvo %in% species_individual) %>%
+  ggplot(aes(x = ANO, y = n, fill = ESTADIO)) +
+  geom_col(color = "black") +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_x_continuous(
+    breaks = seq(1988, 2025, by = 2),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  labs(
+    x = "Ano",
+    y = "Número de indivíduos",
+    fill = "Estágio",
+    title = "Estágios reprodutivos anuais das espécies-alvo de tilápia"
+  ) +
+  tema +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(
+  file.path(comparison_dir, "10_estagio_reprodutivo_por_ano_lado_a_lado.png"),
+  g_estadio_ano_side, width = 14, height = 6, dpi = 300
+)
+
+# ----------------------
+# Gráfico 11 — Distribuição de tamanho
+# ----------------------
+
+tamanho_long_individual <- dados_alvo %>%
+  filter(especie_alvo %in% species_individual) %>%
+  select(especie_alvo, CT, CP) %>%
+  pivot_longer(
+    cols = c(CT, CP),
+    names_to = "variavel",
+    values_to = "valor"
+  ) %>%
+  mutate(
+    variavel = recode(
+      variavel,
+      CT = "Comprimento total (CT)",
+      CP = "Comprimento padrão (CP)"
+    )
+  ) %>%
+  filter(!is.na(valor), valor > 0)
+
+if (nrow(tamanho_long_individual) > 0) {
+  
+  g_tamanho_hist_side <- tamanho_long_individual %>%
+    ggplot(aes(x = valor)) +
+    geom_histogram(bins = 20, fill = "grey60", color = "black") +
+    facet_grid(variavel ~ especie_alvo, scales = "free") +
+    labs(
+      x = NULL,
+      y = "Número de indivíduos",
+      title = "Distribuição de tamanho das espécies-alvo de tilápia"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(comparison_dir, "11_distribuicao_tamanho_lado_a_lado.png"),
+    g_tamanho_hist_side, width = 12, height = 6.5, dpi = 300
+  )
+}
+
+# ----------------------
+# Gráfico 12 — Tamanho por sexo
+# ----------------------
+
+tamanho_sexo_individual <- dados_alvo %>%
+  filter(especie_alvo %in% species_individual) %>%
+  mutate(SEXO = ifelse(is.na(SEXO) | SEXO == "", "Não informado", SEXO)) %>%
+  select(especie_alvo, SEXO, CT, CP) %>%
+  pivot_longer(
+    cols = c(CT, CP),
+    names_to = "variavel",
+    values_to = "valor"
+  ) %>%
+  mutate(
+    variavel = recode(
+      variavel,
+      CT = "Comprimento total (CT)",
+      CP = "Comprimento padrão (CP)"
+    )
+  ) %>%
+  filter(!is.na(valor), valor > 0)
+
+if (nrow(tamanho_sexo_individual) > 0) {
+  
+  g_tamanho_sexo_side <- tamanho_sexo_individual %>%
+    ggplot(aes(x = SEXO, y = valor)) +
+    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
+    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    labs(
+      x = "Sexo",
+      y = NULL,
+      title = "Tamanho das espécies-alvo de tilápia por sexo"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(comparison_dir, "12_tamanho_por_sexo_lado_a_lado.png"),
+    g_tamanho_sexo_side, width = 12, height = 6.5, dpi = 300
+  )
+}
+
+# ----------------------
+# Gráfico 13 — Tamanho por estágio reprodutivo
+# ----------------------
+
+tamanho_estadio_individual <- dados_alvo %>%
+  filter(especie_alvo %in% species_individual) %>%
+  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "Não informado", ESTADIO)) %>%
+  select(especie_alvo, ESTADIO, CT, CP) %>%
+  pivot_longer(
+    cols = c(CT, CP),
+    names_to = "variavel",
+    values_to = "valor"
+  ) %>%
+  mutate(
+    variavel = recode(
+      variavel,
+      CT = "Comprimento total (CT)",
+      CP = "Comprimento padrão (CP)"
+    )
+  ) %>%
+  filter(!is.na(valor), valor > 0)
+
+if (nrow(tamanho_estadio_individual) > 0) {
+  
+  g_tamanho_estadio_side <- tamanho_estadio_individual %>%
+    ggplot(aes(x = ESTADIO, y = valor)) +
+    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
+    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    labs(
+      x = "Estágio reprodutivo",
+      y = NULL,
+      title = "Tamanho das espécies-alvo de tilápia por estágio reprodutivo"
+    ) +
+    tema +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  ggsave(
+    file.path(comparison_dir, "13_tamanho_por_estagio_lado_a_lado.png"),
+    g_tamanho_estadio_side, width = 13, height = 6.5, dpi = 300
+  )
+}
+
+# ----------------------
+# Gráfico 14 — CT vs CP
+# ----------------------
+
+ct_cp_individual <- dados_alvo %>%
+  filter(
+    especie_alvo %in% species_individual,
+    !is.na(CT), !is.na(CP),
+    CT > 0, CP > 0
+  )
+
+if (nrow(ct_cp_individual) > 2) {
+  
+  g_ct_cp_side <- ct_cp_individual %>%
+    ggplot(aes(x = CT, y = CP)) +
+    geom_point(alpha = 0.65, size = 2) +
+    geom_smooth(method = "lm", se = TRUE, color = "black") +
+    facet_wrap(~ especie_alvo, ncol = 2, scales = "free") +
+    labs(
+      x = "Comprimento total (CT)",
+      y = "Comprimento padrão (CP)",
+      title = "Relação comprimento-comprimento das espécies-alvo de tilápia"
+    ) +
+    tema
+  
+  ggsave(
+    file.path(comparison_dir, "14_relacao_ct_cp_lado_a_lado.png"),
+    g_ct_cp_side, width = 12, height = 5.5, dpi = 300
+  )
+}
+
+# ======================
+# 9. Imprimir resumos
+# ======================
+
+print(resumo_geral)
+print(tab_ano)
+print(tab_zona)
+print(tab_sexo)
+print(tab_estadio)
+print(tab_tamanho_resumo)
+
+message("Concluído. Saídas salvas em: ", normalizePath(out_dir, winslash = "\\", mustWork = FALSE))
