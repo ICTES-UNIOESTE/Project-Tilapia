@@ -126,6 +126,248 @@ pretty_group_label_pt <- function(x) {
 }
 
 # ======================
+# 2A. Paletas e padronizações
+# ======================
+
+species_colors <- c(
+  "Oreochromis niloticus" = "#db1e2a",
+  "Coptodon rendalli"     = "#54b04a"
+)
+
+sexo_colors <- c(
+  "Macho"         = "#3b82f6",
+  "Fêmea"         = "#f48fb1",
+  "Não informado" = "#bdbdbd"
+)
+
+estadio_levels <- c("IMT", "MAT", "RPD", "ESG", "REG", "NÃO INFORMADO")
+
+estadio_colors <- c(
+  "IMT"            = "#f2d53c",  # amarelo
+  "MAT"            = "#f39c34",  # laranja
+  "RPD"            = "#d73027",  # vermelho
+  "ESG"            = "#8c510a",  # marrom
+  "REG"            = "#d9c29c",  # bege
+  "NÃO INFORMADO"  = "#bdbdbd"   # cinza
+)
+
+# ======================
+# Formatação numérica em português brasileiro
+# ======================
+
+fmt_num_pt <- function(x, digits = 2, drop0 = TRUE) {
+  out <- ifelse(
+    is.na(x),
+    NA_character_,
+    formatC(
+      x,
+      format = "f",
+      digits = digits,
+      decimal.mark = ",",
+      big.mark = "."
+    )
+  )
+  
+  if (drop0) {
+    out <- stringr::str_replace(out, "(,\\d*?)0+$", "\\1")
+    out <- stringr::str_replace(out, ",$", "")
+  }
+  
+  out
+}
+
+fmt_percent_pt <- function(x, digits = 2, drop0 = TRUE) {
+  ifelse(
+    is.na(x),
+    NA_character_,
+    paste0(fmt_num_pt(x, digits = digits, drop0 = drop0), "%")
+  )
+}
+
+label_num_pt <- function(digits = 2, drop0 = TRUE) {
+  function(x) fmt_num_pt(x, digits = digits, drop0 = drop0)
+}
+
+label_percent_pt <- function(digits = 2, drop0 = TRUE) {
+  function(x) fmt_percent_pt(x, digits = digits, drop0 = drop0)
+}
+
+tema_sem_grade <- theme(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  plot.background = element_rect(fill = "white", color = NA),
+  panel.background = element_rect(fill = "white", color = NA),
+  legend.background = element_rect(fill = "white", color = NA),
+  legend.key = element_rect(fill = "white", color = NA)
+)
+
+padronizar_sexo <- function(x) {
+  x_clean <- x %>%
+    as.character() %>%
+    str_squish() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_upper()
+  
+  case_when(
+    is.na(x_clean) | x_clean == "" ~ "Não informado",
+    x_clean %in% c("M", "MACHO", "MASCULINO") ~ "Macho",
+    x_clean %in% c("F", "FEMEA", "FEMININO") ~ "Fêmea",
+    TRUE ~ "Não informado"
+  )
+}
+
+padronizar_estadio <- function(x) {
+  x_clean <- x %>%
+    as.character() %>%
+    str_squish() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_upper()
+  
+  case_when(
+    is.na(x_clean) | x_clean == "" ~ "NÃO INFORMADO",
+    str_detect(x_clean, "IMT|IMAT") ~ "IMT",
+    str_detect(x_clean, "^MAT$|MATUR") ~ "MAT",
+    str_detect(x_clean, "RPD|REPROD") ~ "RPD",
+    str_detect(x_clean, "ESG|ESGOT") ~ "ESG",
+    str_detect(x_clean, "REG|REGR") ~ "REG",
+    TRUE ~ "NÃO INFORMADO"
+  )
+}
+
+# ======================
+# 2B. Correção espacial a partir do arquivo de biometria
+# ======================
+
+padronizar_zona_biopesca <- function(x) {
+  x_clean <- x %>%
+    as.character() %>%
+    str_squish() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_lower()
+  
+  case_when(
+    is.na(x_clean) | x_clean == "" ~ "Não informado",
+    
+    x_clean %in% c("transicao", "transição", "tran") ~ "Transição",
+    x_clean %in% c("fluvial", "flu", "fluv") ~ "Fluvial",
+    x_clean %in% c("lacustre", "lacu") ~ "Lacustre",
+    
+    x_clean %in% c("nao informado", "não informado") ~ "Não informado",
+    
+    x_clean %in% c("montante") ~ NA_character_,
+    
+    TRUE ~ str_to_title(x_clean)
+  )
+}
+
+pick_first <- function(x, patterns) {
+  for (p in patterns) {
+    idx <- which(str_detect(x, regex(p, ignore_case = TRUE)))
+    if (length(idx) > 0) return(x[idx[1]])
+  }
+  return(NA_character_)
+}
+
+first_non_missing <- function(x) {
+  y <- x[!is.na(x) & x != ""]
+  if (length(y) == 0) return(NA_character_)
+  y[1]
+}
+
+limpar_ref_espacial <- function(x) {
+  x %>%
+    as.character() %>%
+    str_squish() %>%
+    na_if("") %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_upper()
+}
+
+carregar_correcao_espacial <- function(path_biometria) {
+  
+  if (!file.exists(path_biometria)) {
+    message("Arquivo de biometria não encontrado. Correções espaciais não serão aplicadas.")
+    return(NULL)
+  }
+  
+  abas <- readxl::excel_sheets(path_biometria)
+  
+  ref <- NULL
+  aba_usada <- NA_character_
+  
+  for (aba in abas) {
+    ref_teste <- suppressWarnings(
+      readxl::read_excel(path_biometria, sheet = aba, col_types = "text")
+    ) %>%
+      janitor::clean_names()
+    
+    nms_teste <- names(ref_teste)
+    tem_colunas_espaciais <- any(str_detect(nms_teste, regex("^area$|^area_", ignore_case = TRUE))) &&
+      any(str_detect(nms_teste, regex("^zona$|^zona_", ignore_case = TRUE))) &&
+      any(str_detect(nms_teste, regex("^ponto$|^ponto_|^local$", ignore_case = TRUE)))
+    
+    if (tem_colunas_espaciais) {
+      ref <- ref_teste
+      aba_usada <- aba
+      break
+    }
+  }
+  
+  if (is.null(ref)) {
+    message("Nenhuma aba com AREA, ZONA e PONTO foi encontrada no arquivo de biometria. Correções espaciais não serão aplicadas.")
+    return(NULL)
+  }
+  
+  message("Aba usada como referência espacial da biometria: ", aba_usada)
+  
+  nms <- names(ref)
+  
+  ponto_orig_col <- pick_first(nms, c(
+    "^ponto$", "^ponto_original$", "^ponto_orig$", "^local$", "^local_original$"
+  ))
+  ponto_corr_col <- pick_first(nms, c(
+    "^ponto_corrigido$", "^ponto_correto$", "^ponto_novo$", "^ponto_padronizado$", "^ponto_ref$"
+  ))
+  
+  area_orig_col <- pick_first(nms, c(
+    "^area$", "^area_original$", "^area_orig$"
+  ))
+  area_corr_col <- pick_first(nms, c(
+    "^area_corrigida$", "^area_correta$", "^area_nova$", "^area_padronizada$", "^area_ref$"
+  ))
+  
+  zona_orig_col <- pick_first(nms, c(
+    "^zona$", "^zona_original$", "^zona_orig$"
+  ))
+  zona_corr_col <- pick_first(nms, c(
+    "^zona_corrigida$", "^zona_correta$", "^zona_nova$", "^zona_padronizada$", "^zona_ref$"
+  ))
+  
+  out <- ref %>%
+    transmute(
+      ponto_orig = if (!is.na(ponto_orig_col)) .data[[ponto_orig_col]] else NA_character_,
+      ponto_corr = if (!is.na(ponto_corr_col)) .data[[ponto_corr_col]] else NA_character_,
+      area_orig  = if (!is.na(area_orig_col))  .data[[area_orig_col]]  else NA_character_,
+      area_corr  = if (!is.na(area_corr_col))  .data[[area_corr_col]]  else NA_character_,
+      zona_orig  = if (!is.na(zona_orig_col))  .data[[zona_orig_col]]  else NA_character_,
+      zona_corr  = if (!is.na(zona_corr_col))  .data[[zona_corr_col]]  else NA_character_
+    ) %>%
+    mutate(
+      ponto_orig_ref = limpar_ref_espacial(ponto_orig),
+      area_orig_ref  = limpar_ref_espacial(area_orig),
+      zona_orig_ref  = limpar_ref_espacial(zona_orig),
+      ponto_corr     = as.character(ponto_corr) %>% str_squish() %>% na_if(""),
+      area_corr      = as.character(area_corr) %>% str_squish() %>% na_if(""),
+      zona_corr      = as.character(zona_corr) %>% str_squish() %>% na_if("")
+    ) %>%
+    filter(
+      !is.na(ponto_orig_ref) | !is.na(area_orig_ref) | !is.na(zona_orig_ref)
+    )
+  
+  out
+}
+
+# ======================
 # 3. Ler uma planilha
 # ======================
 
@@ -261,15 +503,8 @@ dados <- bind_rows(dados_lista) %>%
     SPECIES_ORIGINAL = as.character(SPECIES) %>% str_squish(),
     SPECIES_CLEAN = clean_species_name(SPECIES),
     
-    ESTADIO = as.character(ESTADIO) %>%
-      str_squish() %>%
-      stringi::stri_trans_general("Latin-ASCII") %>%
-      str_to_upper(),
-    
-    SEXO = as.character(SEXO) %>%
-      str_squish() %>%
-      stringi::stri_trans_general("Latin-ASCII") %>%
-      str_to_upper(),
+    ESTADIO = padronizar_estadio(ESTADIO),
+    SEXO = padronizar_sexo(SEXO),
     
     ZONA = as.character(ZONA) %>% str_squish(),
     AREA = as.character(AREA) %>% str_squish(),
@@ -308,6 +543,65 @@ dados <- bind_rows(dados_lista) %>%
   )
 
 # ======================
+# 4A. Aplicar correções espaciais a partir do arquivo de biometria
+# ======================
+
+caminho_biometria_ref <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/TILÁPIAS Biometria 1998_2025.xlsx"
+correcao_espacial <- carregar_correcao_espacial(caminho_biometria_ref)
+
+if (!is.null(correcao_espacial)) {
+  
+  correcao_exata <- correcao_espacial %>%
+    distinct(
+      zona_orig_ref, area_orig_ref, ponto_orig_ref,
+      zona_corr, area_corr, ponto_corr
+    )
+  
+  correcao_ponto <- correcao_espacial %>%
+    filter(!is.na(ponto_orig_ref)) %>%
+    group_by(ponto_orig_ref) %>%
+    summarise(
+      zona_corr_ponto = first_non_missing(zona_corr),
+      area_corr_ponto = first_non_missing(area_corr),
+      ponto_corr_ponto = first_non_missing(ponto_corr),
+      .groups = "drop"
+    )
+  
+  dados <- dados %>%
+    mutate(
+      zona_orig_ref  = limpar_ref_espacial(ZONA),
+      area_orig_ref  = limpar_ref_espacial(AREA),
+      ponto_orig_ref = limpar_ref_espacial(PONTO)
+    ) %>%
+    left_join(
+      correcao_exata,
+      by = c("zona_orig_ref", "area_orig_ref", "ponto_orig_ref")
+    ) %>%
+    left_join(
+      correcao_ponto,
+      by = "ponto_orig_ref"
+    ) %>%
+    mutate(
+      ZONA  = coalesce(zona_corr, zona_corr_ponto, ZONA),
+      AREA  = coalesce(area_corr, area_corr_ponto, AREA),
+      PONTO = coalesce(ponto_corr, ponto_corr_ponto, PONTO)
+    ) %>%
+    select(
+      -zona_orig_ref, -area_orig_ref, -ponto_orig_ref,
+      -zona_corr, -area_corr, -ponto_corr,
+      -zona_corr_ponto, -area_corr_ponto, -ponto_corr_ponto
+    )
+}
+
+# Padronizar ZONA após a correção espacial, antes de criar as tabelas e gráficos.
+# Padronização final de ZONA após a correção espacial
+# Isso garante a agregação de variações como tran/transição, flu/fluvial e lacu/lacustre.
+dados <- dados %>%
+  mutate(
+    ZONA = padronizar_zona_biopesca(ZONA)
+  )
+
+# ======================
 # 5. Tabela diagnóstica
 # ======================
 
@@ -318,7 +612,7 @@ diagnostico_tilapias <- dados %>%
   count(SPECIES_ORIGINAL, SPECIES_CLEAN, especie_alvo, ANO, name = "n") %>%
   arrange(SPECIES_CLEAN, ANO)
 
-readr::write_csv(
+readr::write_csv2(
   diagnostico_tilapias,
   file.path(out_dir, "tabelas", "diagnostico_nomes_tilapias.csv")
 )
@@ -438,21 +732,27 @@ tab_mes_todos_anos <- dados %>%
   arrange(especie_alvo, MES)
 
 tab_zona <- dados %>%
-  mutate(ZONA = ifelse(is.na(ZONA) | ZONA == "", "Não informado", ZONA)) %>%
+  mutate(ZONA = padronizar_zona_biopesca(ZONA)) %>%
+  filter(!is.na(ZONA)) %>%
   group_by(ZONA) %>%
   summarise(total_peixes = n(), .groups = "drop") %>%
   tidyr::crossing(especie_alvo = factor(niveis_alvo, levels = niveis_alvo)) %>%
   left_join(
     dados_alvo %>%
-      mutate(ZONA = ifelse(is.na(ZONA) | ZONA == "", "Não informado", ZONA)) %>%
+      mutate(ZONA = padronizar_zona_biopesca(ZONA)) %>%
+      filter(!is.na(ZONA)) %>%
       count(especie_alvo, ZONA, name = "n_alvo"),
     by = c("especie_alvo", "ZONA")
   ) %>%
   mutate(
     n_alvo = replace_na(n_alvo, 0L),
-    percentual_alvo = 100 * n_alvo / total_peixes
+    percentual_alvo = 100 * n_alvo / total_peixes,
+    ZONA = factor(
+      ZONA,
+      levels = c("Não informado", "Fluvial", "Lacustre", "Transição")
+    )
   ) %>%
-  arrange(especie_alvo, desc(n_alvo))
+  arrange(especie_alvo, ZONA)
 
 tab_ponto <- dados %>%
   mutate(
@@ -480,22 +780,25 @@ tab_ponto <- dados %>%
 
 tab_sexo <- dados_alvo %>%
   mutate(SEXO = ifelse(is.na(SEXO) | SEXO == "", "Não informado", SEXO)) %>%
+  mutate(SEXO = factor(SEXO, levels = c("Macho", "Fêmea", "Não informado"))) %>%
   count(especie_alvo, SEXO, name = "n") %>%
   group_by(especie_alvo) %>%
   mutate(percentual = 100 * n / sum(n)) %>%
   ungroup() %>%
-  arrange(especie_alvo, desc(n))
+  arrange(especie_alvo, SEXO)
 
 tab_estadio <- dados_alvo %>%
-  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "Não informado", ESTADIO)) %>%
+  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "NÃO INFORMADO", ESTADIO)) %>%
+  mutate(ESTADIO = factor(ESTADIO, levels = estadio_levels)) %>%
   count(especie_alvo, ESTADIO, name = "n") %>%
   group_by(especie_alvo) %>%
   mutate(percentual = 100 * n / sum(n)) %>%
   ungroup() %>%
-  arrange(especie_alvo, desc(n))
+  arrange(especie_alvo, ESTADIO)
 
 tab_estadio_ano <- dados_alvo %>%
-  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "Não informado", ESTADIO)) %>%
+  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "NÃO INFORMADO", ESTADIO)) %>%
+  mutate(ESTADIO = factor(ESTADIO, levels = estadio_levels)) %>%
   count(especie_alvo, ANO, ESTADIO, name = "n") %>%
   group_by(especie_alvo, ANO) %>%
   mutate(percentual = 100 * n / sum(n)) %>%
@@ -545,10 +848,16 @@ write_xlsx(
 
 tema <- theme_bw(base_size = 12) +
   theme(
+    panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     plot.title = element_text(face = "bold"),
     legend.position = "bottom",
-    strip.text = element_text(face = "italic", size = 11)
+    strip.text = element_text(face = "italic", size = 11),
+    strip.background = element_rect(fill = "grey85", color = "black"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA)
   )
 
 # ============================================================
@@ -561,27 +870,35 @@ tema <- theme_bw(base_size = 12) +
 
 g_ano_n_side <- tab_ano %>%
   filter(especie_alvo %in% species_individual) %>%
-  ggplot(aes(x = ANO, y = n_alvo)) +
-  geom_col(fill = "grey60", color = "black") +
-  geom_line(aes(group = 1), linewidth = 0.7) +
-  geom_point(size = 2) +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  ggplot(aes(x = ANO, y = n_alvo, fill = especie_alvo, color = especie_alvo)) +
+  geom_col(width = 0.8, color = "black", show.legend = FALSE) +
+  geom_line(aes(group = 1), linewidth = 0.7, show.legend = FALSE) +
+  geom_point(size = 2, show.legend = FALSE) +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_fill_manual(values = species_colors) +
+  scale_color_manual(values = species_colors) +
   scale_x_continuous(
     breaks = seq(1988, 2025, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
   ) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  scale_y_continuous(
+    limits = c(0, 16),
+    breaks = seq(0, 16, by = 4),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
   labs(
     x = "Ano",
     y = "Número de indivíduos",
     title = "Abundância anual das espécies-alvo de tilápia"
   ) +
   tema +
+  tema_sem_grade +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 ggsave(
   file.path(comparison_dir, "01_numero_anual_lado_a_lado.png"),
-  g_ano_n_side, width = 13, height = 5.5, dpi = 300
+  g_ano_n_side, width = 13, height = 5.5, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -590,17 +907,19 @@ ggsave(
 
 g_ano_rel_side <- tab_ano %>%
   filter(especie_alvo %in% species_individual) %>%
-  ggplot(aes(x = ANO, y = percentual_alvo)) +
-  geom_col(fill = "grey60", color = "black") +
-  geom_line(aes(group = 1), linewidth = 0.7) +
-  geom_point(size = 2) +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  ggplot(aes(x = ANO, y = percentual_alvo, fill = especie_alvo, color = especie_alvo)) +
+  geom_col(width = 0.8, color = "black", show.legend = FALSE) +
+  geom_line(aes(group = 1), linewidth = 0.7, show.legend = FALSE) +
+  geom_point(size = 2, show.legend = FALSE) +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_fill_manual(values = species_colors) +
+  scale_color_manual(values = species_colors) +
   scale_x_continuous(
     breaks = seq(1988, 2025, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
   ) +
   scale_y_continuous(
-    labels = function(x) paste0(x, "%"),
+    labels = label_percent_pt(digits = 2),
     expand = expansion(mult = c(0, 0.15))
   ) +
   labs(
@@ -609,11 +928,13 @@ g_ano_rel_side <- tab_ano %>%
     title = "Abundância relativa anual das espécies-alvo de tilápia"
   ) +
   tema +
+  tema_sem_grade +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 ggsave(
   file.path(comparison_dir, "02_abundancia_relativa_anual_lado_a_lado.png"),
-  g_ano_rel_side, width = 13, height = 5.5, dpi = 300
+  g_ano_rel_side, width = 13, height = 5.5, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -626,28 +947,34 @@ g_acumulado_side <- tab_ano %>%
   arrange(ANO, .by_group = TRUE) %>%
   mutate(n_acumulado = cumsum(n_alvo)) %>%
   ungroup() %>%
-  ggplot(aes(x = ANO, y = n_acumulado)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 2) +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  ggplot(aes(x = ANO, y = n_acumulado, color = especie_alvo)) +
+  geom_line(linewidth = 1, show.legend = FALSE) +
+  geom_point(size = 2, show.legend = FALSE) +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_color_manual(values = species_colors) +
   scale_x_continuous(
     breaks = seq(1988, 2025, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
   ) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, by = 20),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
   labs(
     x = "Ano",
     y = "Número acumulado de indivíduos",
     title = "Registros acumulados das espécies-alvo de tilápia"
   ) +
   tema +
+  tema_sem_grade +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 ggsave(
   file.path(comparison_dir, "03_numero_acumulado_lado_a_lado.png"),
-  g_acumulado_side, width = 13, height = 5.5, dpi = 300
+  g_acumulado_side, width = 13, height = 5.5, dpi = 300,
+  bg = "white"
 )
-
 # ----------------------
 # Gráfico 4 — Heatmap mês x ano
 # ----------------------
@@ -655,7 +982,7 @@ ggsave(
 g_heat_ano_mes_side <- tab_ano_mes %>%
   filter(especie_alvo %in% species_individual) %>%
   ggplot(aes(x = ANO, y = mes_nome, fill = n_alvo)) +
-  geom_tile(color = "white") +
+  geom_tile(color = NA) +
   scale_fill_gradient(low = "grey95", high = "grey20") +
   facet_wrap(~ especie_alvo, ncol = 2) +
   scale_x_continuous(
@@ -673,7 +1000,8 @@ g_heat_ano_mes_side <- tab_ano_mes %>%
 
 ggsave(
   file.path(comparison_dir, "04_heatmap_mes_ano_lado_a_lado.png"),
-  g_heat_ano_mes_side, width = 14, height = 5.8, dpi = 300
+  g_heat_ano_mes_side, width = 14, height = 5.8, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -682,21 +1010,28 @@ ggsave(
 
 g_mes_todos_side <- tab_mes_todos_anos %>%
   filter(especie_alvo %in% species_individual) %>%
-  ggplot(aes(x = mes_nome, y = n_alvo)) +
-  geom_col(fill = "grey60", color = "black") +
+  ggplot(aes(x = mes_nome, y = n_alvo, fill = especie_alvo)) +
+  geom_col(color = "black", show.legend = FALSE) +
   geom_text(aes(label = n_alvo), vjust = -0.3, size = 3.2) +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_fill_manual(values = species_colors) +
+  scale_y_continuous(
+    limits = c(0, 35),
+    breaks = seq(0, 35, by = 5),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
   labs(
     x = "Mês",
     y = "Número de indivíduos",
     title = "Abundância mensal das espécies-alvo de tilápia, 1988–2025"
   ) +
-  tema
+  tema +
+  tema_sem_grade
 
 ggsave(
   file.path(comparison_dir, "05_numero_mensal_lado_a_lado.png"),
-  g_mes_todos_side, width = 12, height = 5.5, dpi = 300
+  g_mes_todos_side, width = 12, height = 5.5, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -704,26 +1039,30 @@ ggsave(
 # ----------------------
 
 g_zona_n_side <- tab_zona %>%
-  filter(especie_alvo %in% species_individual) %>%
-  group_by(especie_alvo) %>%
-  mutate(ZONA = fct_reorder(ZONA, n_alvo)) %>%
-  ungroup() %>%
-  ggplot(aes(x = ZONA, y = n_alvo)) +
-  geom_col(fill = "grey60", color = "black") +
+  filter(
+    especie_alvo %in% species_individual,
+    !is.na(ZONA),
+    n_alvo > 0
+  ) %>%
+  ggplot(aes(x = ZONA, y = n_alvo, fill = especie_alvo)) +
+  geom_col(color = "black", show.legend = FALSE) +
   geom_text(aes(label = n_alvo), hjust = -0.15, size = 3.2) +
   coord_flip() +
   facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_fill_manual(values = species_colors) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
   labs(
     x = NULL,
     y = "Número de indivíduos",
     title = "Abundância das espécies-alvo de tilápia por zona"
   ) +
-  tema
+  tema +
+  tema_sem_grade
 
 ggsave(
   file.path(comparison_dir, "06_numero_por_zona_lado_a_lado.png"),
-  g_zona_n_side, width = 12, height = 5.5, dpi = 300
+  g_zona_n_side, width = 12, height = 5.5, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -731,21 +1070,23 @@ ggsave(
 # ----------------------
 
 g_zona_rel_side <- tab_zona %>%
-  filter(especie_alvo %in% species_individual) %>%
-  group_by(especie_alvo) %>%
-  mutate(ZONA = fct_reorder(ZONA, percentual_alvo)) %>%
-  ungroup() %>%
-  ggplot(aes(x = ZONA, y = percentual_alvo)) +
-  geom_col(fill = "grey60", color = "black") +
+  filter(
+    especie_alvo %in% species_individual,
+    !is.na(ZONA),
+    percentual_alvo > 0
+  ) %>%
+  ggplot(aes(x = ZONA, y = percentual_alvo, fill = especie_alvo)) +
+  geom_col(color = "black", show.legend = FALSE) +
   geom_text(
-    aes(label = sprintf("%.2f%%", percentual_alvo)),
+    aes(label = fmt_percent_pt(percentual_alvo, digits = 2, drop0 = FALSE)),
     hjust = -0.15,
     size = 3.2
   ) +
   coord_flip() +
   facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_fill_manual(values = species_colors) +
   scale_y_continuous(
-    labels = function(x) paste0(x, "%"),
+    labels = label_percent_pt(digits = 2),
     expand = expansion(mult = c(0, 0.22))
   ) +
   labs(
@@ -753,11 +1094,13 @@ g_zona_rel_side <- tab_zona %>%
     y = "Abundância relativa",
     title = "Abundância relativa das espécies-alvo de tilápia por zona"
   ) +
-  tema
+  tema +
+  tema_sem_grade
 
 ggsave(
   file.path(comparison_dir, "07_abundancia_relativa_por_zona_lado_a_lado.png"),
-  g_zona_rel_side, width = 12, height = 5.5, dpi = 300
+  g_zona_rel_side, width = 12, height = 5.5, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -766,29 +1109,46 @@ ggsave(
 
 g_sexo_side <- tab_sexo %>%
   filter(especie_alvo %in% species_individual) %>%
-  group_by(especie_alvo) %>%
-  mutate(SEXO = fct_reorder(SEXO, n)) %>%
-  ungroup() %>%
-  ggplot(aes(x = SEXO, y = n)) +
-  geom_col(fill = "grey60", color = "black") +
+  mutate(
+    SEXO = factor(SEXO, levels = c("Macho", "Fêmea", "Não informado")),
+    x = 1
+  ) %>%
+  ggplot(aes(x = x, y = n, fill = SEXO)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  facet_wrap(~ especie_alvo, ncol = 2, scales = "free") +
   geom_text(
-    aes(label = paste0(n, " (", sprintf("%.1f", percentual), "%)")),
-    hjust = -0.1,
-    size = 3.2
+    aes(label = ifelse(n > 0, paste0(n, "\n(", fmt_percent_pt(percentual, digits = 1, drop0 = FALSE), ")"), "")),
+    position = position_stack(vjust = 0.5),
+    size = 3.5
   ) +
-  coord_flip() +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
+  scale_fill_manual(values = sexo_colors, drop = FALSE) +
+  xlim(0.5, 1.5) +
   labs(
-    x = "Sexo",
-    y = "Número de indivíduos",
-    title = "Composição por sexo das espécies-alvo de tilápia"
+    title = "Composição por sexo das espécies-alvo de tilápia",
+    fill = "Sexo"
   ) +
-  tema
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    strip.text = element_text(face = "italic", size = 11),
+    strip.background = element_rect(fill = "grey85", color = "black"),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.border = element_rect(fill = NA, color = "black"),
+    plot.background = element_rect(fill = "white", color = NA),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA),
+    panel.grid = element_blank(),
+    panel.spacing = grid::unit(1, "lines"),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
 
 ggsave(
   file.path(comparison_dir, "08_composicao_por_sexo_lado_a_lado.png"),
-  g_sexo_side, width = 12, height = 5.5, dpi = 300
+  g_sexo_side, width = 12, height = 6, dpi = 300, bg = "white"
 )
 
 # ----------------------
@@ -797,29 +1157,31 @@ ggsave(
 
 g_estadio_side <- tab_estadio %>%
   filter(especie_alvo %in% species_individual) %>%
-  group_by(especie_alvo) %>%
-  mutate(ESTADIO = fct_reorder(ESTADIO, n)) %>%
-  ungroup() %>%
-  ggplot(aes(x = ESTADIO, y = n)) +
-  geom_col(fill = "grey60", color = "black") +
+  mutate(ESTADIO = factor(as.character(ESTADIO), levels = rev(estadio_levels))) %>%
+  ggplot(aes(x = ESTADIO, y = n, fill = ESTADIO)) +
+  geom_col(color = "black") +
   geom_text(
-    aes(label = paste0(n, " (", sprintf("%.1f", percentual), "%)")),
+    aes(label = paste0(n, " (", fmt_percent_pt(percentual, digits = 1, drop0 = FALSE), ")")),
     hjust = -0.1,
     size = 3.2
   ) +
   coord_flip() +
   facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  scale_fill_manual(values = estadio_colors, drop = FALSE) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
   labs(
     x = "Estágio reprodutivo",
     y = "Número de indivíduos",
     title = "Estágios reprodutivos das espécies-alvo de tilápia"
   ) +
-  tema
+  tema +
+  tema_sem_grade +
+  theme(legend.position = "bottom")
 
 ggsave(
   file.path(comparison_dir, "09_estagio_reprodutivo_lado_a_lado.png"),
-  g_estadio_side, width = 12, height = 5.5, dpi = 300
+  g_estadio_side, width = 12.5, height = 5.8, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -828,12 +1190,19 @@ ggsave(
 
 g_estadio_ano_side <- tab_estadio_ano %>%
   filter(especie_alvo %in% species_individual) %>%
+  mutate(ESTADIO = factor(as.character(ESTADIO), levels = estadio_levels)) %>%
   ggplot(aes(x = ANO, y = n, fill = ESTADIO)) +
   geom_col(color = "black") +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_fill_manual(values = estadio_colors, breaks = estadio_levels, drop = FALSE) +
   scale_x_continuous(
     breaks = seq(1988, 2025, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  scale_y_continuous(
+    limits = c(0, 16),
+    breaks = seq(0, 16, by = 4),
+    expand = expansion(mult = c(0, 0.04))
   ) +
   labs(
     x = "Ano",
@@ -842,11 +1211,13 @@ g_estadio_ano_side <- tab_estadio_ano %>%
     title = "Estágios reprodutivos anuais das espécies-alvo de tilápia"
   ) +
   tema +
+  tema_sem_grade +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 ggsave(
   file.path(comparison_dir, "10_estagio_reprodutivo_por_ano_lado_a_lado.png"),
-  g_estadio_ano_side, width = 14, height = 6, dpi = 300
+  g_estadio_ano_side, width = 14, height = 6, dpi = 300,
+  bg = "white"
 )
 
 # ----------------------
@@ -872,20 +1243,30 @@ tamanho_long_individual <- dados_alvo %>%
 
 if (nrow(tamanho_long_individual) > 0) {
   
+  x_max_tamanho <- max(tamanho_long_individual$valor, na.rm = TRUE)
+  
   g_tamanho_hist_side <- tamanho_long_individual %>%
     ggplot(aes(x = valor)) +
     geom_histogram(bins = 20, fill = "grey60", color = "black") +
-    facet_grid(variavel ~ especie_alvo, scales = "free") +
+    facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_x_continuous(
+      limits = c(0, x_max_tamanho),
+      breaks = scales::breaks_pretty(n = 10),
+      labels = label_num_pt(digits = 1),
+      expand = expansion(mult = c(0, 0.02))
+    ) +
     labs(
       x = NULL,
       y = "Número de indivíduos",
       title = "Distribuição de tamanho das espécies-alvo de tilápia"
     ) +
-    tema
+    tema +
+    tema_sem_grade
   
   ggsave(
     file.path(comparison_dir, "11_distribuicao_tamanho_lado_a_lado.png"),
-    g_tamanho_hist_side, width = 12, height = 6.5, dpi = 300
+    g_tamanho_hist_side, width = 12, height = 6.5, dpi = 300,
+  bg = "white"
   )
 }
 
@@ -918,16 +1299,22 @@ if (nrow(tamanho_sexo_individual) > 0) {
     geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
     geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_y_continuous(
+      breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 1)
+    ) +
     labs(
       x = "Sexo",
       y = NULL,
       title = "Tamanho das espécies-alvo de tilápia por sexo"
     ) +
-    tema
+    tema +
+    tema_sem_grade
   
   ggsave(
     file.path(comparison_dir, "12_tamanho_por_sexo_lado_a_lado.png"),
-    g_tamanho_sexo_side, width = 12, height = 6.5, dpi = 300
+    g_tamanho_sexo_side, width = 12, height = 6.5, dpi = 300,
+  bg = "white"
   )
 }
 
@@ -960,17 +1347,23 @@ if (nrow(tamanho_estadio_individual) > 0) {
     geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
     geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_y_continuous(
+      breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 1)
+    ) +
     labs(
       x = "Estágio reprodutivo",
       y = NULL,
       title = "Tamanho das espécies-alvo de tilápia por estágio reprodutivo"
     ) +
     tema +
+    tema_sem_grade +
     theme(axis.text.x = element_text(angle = 45, hjust = 1))
   
   ggsave(
     file.path(comparison_dir, "13_tamanho_por_estagio_lado_a_lado.png"),
-    g_tamanho_estadio_side, width = 13, height = 6.5, dpi = 300
+    g_tamanho_estadio_side, width = 13, height = 6.5, dpi = 300,
+  bg = "white"
   )
 }
 
@@ -987,21 +1380,35 @@ ct_cp_individual <- dados_alvo %>%
 
 if (nrow(ct_cp_individual) > 2) {
   
+  y_max_cp <- max(ct_cp_individual$CP, na.rm = TRUE)
+  
   g_ct_cp_side <- ct_cp_individual %>%
     ggplot(aes(x = CT, y = CP)) +
     geom_point(alpha = 0.65, size = 2) +
     geom_smooth(method = "lm", se = TRUE, color = "black") +
-    facet_wrap(~ especie_alvo, ncol = 2, scales = "free") +
+    facet_wrap(~ especie_alvo, ncol = 2, scales = "free_x") +
+    scale_x_continuous(
+      breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 1)
+    ) +
+    scale_y_continuous(
+      limits = c(0, y_max_cp),
+      breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 1),
+      expand = expansion(mult = c(0, 0.05))
+    ) +
     labs(
       x = "Comprimento total (CT)",
       y = "Comprimento padrão (CP)",
       title = "Relação comprimento-comprimento das espécies-alvo de tilápia"
     ) +
-    tema
+    tema +
+    tema_sem_grade
   
   ggsave(
     file.path(comparison_dir, "14_relacao_ct_cp_lado_a_lado.png"),
-    g_ct_cp_side, width = 12, height = 5.5, dpi = 300
+    g_ct_cp_side, width = 12, height = 5.5, dpi = 300,
+  bg = "white"
   )
 }
 
