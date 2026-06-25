@@ -23,9 +23,12 @@
 #     CPUE = SEMANATOT / DIASTOT
 #
 # Ajustes:
-#   - ZONA padronizada: Lacustre, Fluvial, Transição, Montante
-#   - Gráficos temporais iniciam em 1988
+#   - ZONA padronizada com base no arquivo de biometria
+#   - Gráficos temporais iniciam em 2008
 #   - Eixos Y dos gráficos temporais com mais marcas
+#   - Valores em eixos, legendas e rótulos formatados com vírgula decimal
+#   - 2008 e 2009: inclui registros de tilápia codificados como "tilapi" em ESPECIE
+#   - 2008 e 2009: rendimento entra nos totais, mas CPUE fica NA por ausência de esforço compatível
 # ============================================================
 
 suppressPackageStartupMessages({
@@ -43,6 +46,8 @@ suppressPackageStartupMessages({
   library(readr)
   library(writexl)
 })
+
+anos_monitoramento <- 2008:2025
 
 # ======================
 # 1. Caminhos
@@ -145,39 +150,107 @@ nome_mes_pt <- function(mes_num) {
   )
 }
 
+normalizar_codigo_especie <- function(x) {
+  x %>%
+    as.character() %>%
+    str_squish() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_lower() %>%
+    str_replace_all("[^a-z0-9]+", " ") %>%
+    str_squish()
+}
+
 identificar_tilapia <- function(especie_limpa) {
-  str_detect(
-    especie_limpa,
-    paste0(
-      "\\btilapia\\b|\\btilapias\\b|",
-      "\\btilap\\b|^tilap|",
-      "\\btila\\b|^tila$|",
-      "\\btil\\b|^til$|",
-      "\\boreochromis\\b|\\bniloticus\\b|\\bnilotic\\b|",
-      "\\bcoptodon\\b|\\brendalli\\b|\\brendali\\b|\\brendal\\b"
-    )
+  # Reconhece tilápias por códigos, nomes comuns e nomes científicos.
+  # Importante: "tilapi" é tratado como sinônimo em TODOS os anos,
+  # não apenas em 2008 e 2009.
+  x <- normalizar_codigo_especie(especie_limpa)
+  x_compacto <- str_replace_all(x, "\\s+", "")
+  
+  case_when(
+    is.na(x) | x == "" ~ FALSE,
+    x_compacto %in% c("tilapi", "tilapia", "tilapias", "tilap", "tila", "til") ~ TRUE,
+    str_detect(x_compacto, "^tilapi") ~ TRUE,
+    str_detect(x_compacto, "^tilap") ~ TRUE,
+    str_detect(x, "\\btilapia\\b|\\btilapias\\b") ~ TRUE,
+    str_detect(x, "\\boreochromis\\b|\\bniloticus\\b|\\bnilotic\\b") ~ TRUE,
+    str_detect(x, "\\bcoptodon\\b|\\brendalli\\b|\\brendali\\b|\\brendal\\b") ~ TRUE,
+    TRUE ~ FALSE
   )
+}
+
+classificar_grupo_especie <- function(especie_limpa) {
+  ifelse(identificar_tilapia(especie_limpa), "Tilápias", "Outras espécies")
 }
 
 tema <- theme_bw(base_size = 12) +
   theme(
+    panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     plot.title = element_text(face = "bold"),
-    legend.position = "bottom"
+    legend.position = "bottom",
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.key = element_rect(fill = "white", color = NA),
+    strip.background = element_rect(fill = "grey85", color = "black")
   )
 
+# ======================
+# Formatação numérica em português brasileiro
+# ======================
+
+fmt_num_pt <- function(x, digits = 2, drop0 = TRUE) {
+  out <- ifelse(
+    is.na(x),
+    NA_character_,
+    formatC(
+      x,
+      format = "f",
+      digits = digits,
+      decimal.mark = ",",
+      big.mark = "."
+    )
+  )
+  
+  if (drop0) {
+    out <- stringr::str_replace(out, "(,\\d*?)0+$", "\\1")
+    out <- stringr::str_replace(out, ",$", "")
+  }
+  
+  out
+}
+
+fmt_percent_pt <- function(x, digits = 2, drop0 = TRUE) {
+  ifelse(
+    is.na(x),
+    NA_character_,
+    paste0(fmt_num_pt(x, digits = digits, drop0 = drop0), "%")
+  )
+}
+
+label_num_pt <- function(digits = 2, drop0 = TRUE) {
+  function(x) fmt_num_pt(x, digits = digits, drop0 = drop0)
+}
+
+label_percent_pt <- function(digits = 2, drop0 = TRUE) {
+  function(x) fmt_percent_pt(x, digits = digits, drop0 = drop0)
+}
+
 # Funções para aumentar o número de marcas nos eixos Y
-eixo_y_temporal <- function(n = 8, expand_top = 0.10) {
+# e formatar os valores com vírgula decimal, no padrão brasileiro.
+eixo_y_temporal <- function(n = 8, expand_top = 0.10, digits = 2) {
   scale_y_continuous(
     breaks = scales::breaks_pretty(n = n),
+    labels = label_num_pt(digits = digits),
     expand = expansion(mult = c(0, expand_top))
   )
 }
 
-eixo_y_temporal_percentual <- function(n = 8, expand_top = 0.15) {
+eixo_y_temporal_percentual <- function(n = 8, expand_top = 0.15, digits = 2) {
   scale_y_continuous(
     breaks = scales::breaks_pretty(n = n),
-    labels = function(x) paste0(x, "%"),
+    labels = label_percent_pt(digits = digits),
     expand = expansion(mult = c(0, expand_top))
   )
 }
@@ -191,128 +264,232 @@ ler_rendimento_ano <- function(arquivo) {
   ano_file <- str_extract(basename(arquivo), "\\d{4}") %>% as.integer()
   abas <- readxl::excel_sheets(arquivo)
   
-  aba_escolhida <- case_when(
-    any(limpar_texto(abas) == "revisado") ~ abas[limpar_texto(abas) == "revisado"][1],
-    any(str_detect(limpar_texto(abas), "banco de dados")) ~ abas[str_detect(limpar_texto(abas), "banco de dados")][1],
-    any(str_detect(limpar_texto(abas), "rendimento")) ~ abas[str_detect(limpar_texto(abas), "rendimento")][1],
-    TRUE ~ abas[1]
-  )
-  
-  df <- suppressWarnings(readxl::read_excel(arquivo, sheet = aba_escolhida)) %>%
-    janitor::clean_names()
-  
-  df <- df %>%
-    rename(
-      especie = any_of(c(
-        "especie",
-        "especies",
-        "esp_cie",
-        "esp_cies",
-        "species"
-      )),
-      semanatot = any_of(c(
-        "semanatot",
-        "semana_tot",
-        "semana_total",
-        "total_semana",
-        "peso_semana",
-        "peso_total",
-        "kg",
-        "quilograma"
-      )),
-      diastot = any_of(c(
-        "diastot",
-        "dias_tot",
-        "dias_total",
-        "total_dias",
-        "dias",
-        "n_dias"
-      )),
-      data = any_of(c(
-        "data",
-        "date",
-        "periodo",
-        "per_odo"
-      )),
-      zona = any_of(c(
-        "zona",
-        "zona_de_pesca",
-        "zona_pesca",
-        "regiao",
-        "regi_o"
-      )),
-      area = any_of(c(
-        "area",
-        "area_de_pesca",
-        "area_pesca"
-      )),
-      ponto = any_of(c(
-        "ponto",
-        "ponto_",
-        "ponto_de_pesca",
-        "ponto_pesca"
-      )),
-      pescador_cod = any_of(c(
-        "pescador_cod",
-        "pescador_codigo",
-        "pescador_c_digo",
-        "codigo_pescador",
-        "cod_pescador"
-      ))
+  ler_aba <- function(aba_atual) {
+    df <- suppressWarnings(readxl::read_excel(arquivo, sheet = aba_atual)) %>%
+      janitor::clean_names()
+    
+    df <- df %>%
+      rename(
+        especie = any_of(c(
+          "especie", "especies", "esp_cie", "esp_cies", "species"
+        )),
+        semanatot = any_of(c(
+          "semanatot", "semana_tot", "semana_total", "total_semana",
+          "peso_semana", "peso_total", "kg", "quilograma"
+        )),
+        diastot = any_of(c(
+          "diastot", "dias_tot", "dias_total", "total_dias", "dias", "n_dias"
+        )),
+        data = any_of(c(
+          "data", "date", "periodo", "per_odo"
+        )),
+        zona = any_of(c(
+          "zona", "zona_de_pesca", "zona_pesca", "regiao", "regi_o"
+        )),
+        area = any_of(c(
+          "area", "area_de_pesca", "area_pesca"
+        )),
+        ponto = any_of(c(
+          "ponto", "ponto_", "ponto_de_pesca", "ponto_pesca"
+        )),
+        pescador_cod = any_of(c(
+          "pescador_cod", "pescador_codigo", "pescador_c_digo",
+          "codigo_pescador", "cod_pescador", "pescador"
+        )),
+        local = any_of(c(
+          "local", "localidade"
+        ))
+      )
+    
+    semana_cols_detectadas <- names(df)[str_detect(names(df), "^semana_?[1-5]$")]
+    dias_cols_detectadas <- names(df)[str_detect(names(df), "^dias?_?[1-5]$")]
+    
+    if (!("especie" %in% names(df)) ||
+        (!("semanatot" %in% names(df)) && length(semana_cols_detectadas) == 0)) {
+      return(NULL)
+    }
+    
+    # Colunas opcionais
+    if (!"data" %in% names(df)) df$data <- NA_character_
+    if (!"zona" %in% names(df)) df$zona <- NA_character_
+    if (!"area" %in% names(df)) df$area <- NA_character_
+    if (!"ponto" %in% names(df)) {
+      if ("local" %in% names(df)) {
+        df$ponto <- df$local
+      } else {
+        df$ponto <- NA_character_
+      }
+    }
+    if (!"pescador_cod" %in% names(df)) df$pescador_cod <- NA_character_
+    if (!"semanatot" %in% names(df)) df$semanatot <- NA_character_
+    if (!"diastot" %in% names(df)) df$diastot <- NA_character_
+    
+    # Em alguns anos/abas, principalmente na estrutura antiga,
+    # SEMANATOT ou DIASTOT podem estar ausentes ou vazios mesmo quando
+    # SEMANA1–SEMANA5 ou DIAS1–DIAS5 estão preenchidos.
+    # Aqui calculamos os totais a partir das colunas semanais quando necessário.
+    soma_linhas_numericas <- function(data, cols) {
+      if (length(cols) == 0) return(rep(NA_real_, nrow(data)))
+      tmp <- as.data.frame(lapply(data[cols], to_number))
+      n_validos <- rowSums(!is.na(tmp))
+      soma <- rowSums(tmp, na.rm = TRUE)
+      soma[n_validos == 0 | soma <= 0] <- NA_real_
+      soma
+    }
+    
+    df$.semanatot_lido <- to_number(df$semanatot)
+    df$.semanatot_soma_semanas <- soma_linhas_numericas(df, semana_cols_detectadas)
+    df$.semanatot_final <- dplyr::coalesce(df$.semanatot_lido, df$.semanatot_soma_semanas)
+    
+    df$.diastot_lido <- to_number(df$diastot)
+    df$.diastot_soma_dias <- soma_linhas_numericas(df, dias_cols_detectadas)
+    df$.diastot_final <- dplyr::coalesce(df$.diastot_lido, df$.diastot_soma_dias)
+    
+    # A CPUE é calculada em todos os anos quando DIASTOT existe e é > 0.
+    # Isso inclui 2008 e 2009, pois esses anos possuem DIASTOT.
+    out <- df %>%
+      transmute(
+        ano = ano_file,
+        arquivo = basename(arquivo),
+        caminho_arquivo = arquivo,
+        aba = aba_atual,
+        
+        data_original = as.character(data),
+        data = parse_data_robusta(data),
+        mes_num = month(data),
+        mes_nome = nome_mes_pt(mes_num),
+        
+        especie_original = as.character(especie) %>% str_squish(),
+        especie_limpa = limpar_texto(especie_original),
+        especie_codigo_normalizado = normalizar_codigo_especie(especie_original),
+        grupo_especie_rendimento = classificar_grupo_especie(especie_limpa),
+        is_tilapia = grupo_especie_rendimento == "Tilápias",
+        
+        zona = padronizar_zona(zona),
+        
+        area = as.character(area) %>% str_squish(),
+        area = ifelse(is.na(area) | area == "", "Não informado", area),
+        
+        ponto = as.character(ponto) %>% str_squish(),
+        ponto = ifelse(is.na(ponto) | ponto == "", "Não informado", ponto),
+        
+        pescador_cod = as.character(pescador_cod) %>% str_squish(),
+        
+        semanatot = .semanatot_final,
+        semanatot_lido = .semanatot_lido,
+        semanatot_soma_semanas = .semanatot_soma_semanas,
+        origem_semanatot = case_when(
+          !is.na(.semanatot_lido) ~ "SEMANATOT",
+          is.na(.semanatot_lido) & !is.na(.semanatot_soma_semanas) ~ "Soma de SEMANA1–SEMANA5",
+          TRUE ~ "Sem rendimento válido"
+        ),
+        diastot_original = .diastot_final,
+        diastot_lido = .diastot_lido,
+        diastot_soma_dias = .diastot_soma_dias,
+        origem_diastot = case_when(
+          !is.na(.diastot_lido) ~ "DIASTOT",
+          is.na(.diastot_lido) & !is.na(.diastot_soma_dias) ~ "Soma de DIAS1–DIAS5",
+          TRUE ~ "Sem esforço válido"
+        ),
+        diastot = diastot_original,
+        
+        cpue = ifelse(
+          !is.na(semanatot) & !is.na(diastot) & diastot > 0,
+          semanatot / diastot,
+          NA_real_
+        ),
+        
+        cpue_disponivel = !is.na(semanatot) & !is.na(diastot) & diastot > 0,
+        observacao_cpue = case_when(
+          is.na(semanatot) | semanatot <= 0 ~ "Sem rendimento válido",
+          is.na(diastot) | diastot <= 0 ~ "Sem DIASTOT válido para CPUE",
+          TRUE ~ "CPUE calculável"
+        )
+      ) %>%
+      filter(
+        !is.na(especie_limpa),
+        especie_limpa != "",
+        !is.na(semanatot)
+      )
+    
+    out$.n_linhas_validas_aba <- nrow(out)
+    out$.n_tilapias_aba <- sum(out$is_tilapia, na.rm = TRUE)
+    out$.prioridade_aba <- case_when(
+      limpar_texto(aba_atual) == "revisado" ~ 1L,
+      str_detect(limpar_texto(aba_atual), "banco de dados") ~ 2L,
+      str_detect(limpar_texto(aba_atual), "rendimento") ~ 3L,
+      TRUE ~ 4L
     )
+    
+    out
+  }
   
-  # Apenas estas três colunas são obrigatórias
-  if (!all(c("especie", "semanatot", "diastot") %in% names(df))) {
+  abas_lidas <- purrr::map(abas, purrr::possibly(ler_aba, otherwise = NULL)) %>%
+    purrr::compact()
+  
+  if (length(abas_lidas) == 0) {
     warning(
-      "Arquivo ignorado porque a aba selecionada em ", basename(arquivo),
-      " não possui as colunas mínimas esperadas: ESPECIE, SEMANATOT e DIASTOT."
+      "Arquivo ignorado porque nenhuma aba em ", basename(arquivo),
+      " possui as colunas mínimas esperadas: ESPECIE e SEMANATOT."
     )
     return(NULL)
   }
   
-  # Colunas opcionais
-  if (!"data" %in% names(df)) df$data <- NA_character_
-  if (!"zona" %in% names(df)) df$zona <- NA_character_
-  if (!"area" %in% names(df)) df$area <- NA_character_
-  if (!"ponto" %in% names(df)) df$ponto <- NA_character_
-  if (!"pescador_cod" %in% names(df)) df$pescador_cod <- NA_character_
-  
-  df %>%
-    transmute(
-      ano = ano_file,
-      arquivo = basename(arquivo),
-      caminho_arquivo = arquivo,
-      aba = aba_escolhida,
-      
-      data_original = as.character(data),
-      data = parse_data_robusta(data),
-      mes_num = month(data),
-      mes_nome = nome_mes_pt(mes_num),
-      
-      especie_original = as.character(especie) %>% str_squish(),
-      especie_limpa = limpar_texto(especie_original),
-      
-      zona = padronizar_zona(zona),
-      
-      area = as.character(area) %>% str_squish(),
-      area = ifelse(is.na(area) | area == "", "Não informado", area),
-      
-      ponto = as.character(ponto) %>% str_squish(),
-      ponto = ifelse(is.na(ponto) | ponto == "", "Não informado", ponto),
-      
-      pescador_cod = as.character(pescador_cod) %>% str_squish(),
-      
-      semanatot = to_number(semanatot),
-      diastot = to_number(diastot),
-      
-      cpue = ifelse(
-        !is.na(semanatot) & !is.na(diastot) & diastot > 0,
-        semanatot / diastot,
-        NA_real_
-      ),
-      
-      is_tilapia = identificar_tilapia(especie_limpa)
+  diagnostico_abas <- purrr::map_dfr(
+    abas_lidas,
+    ~ tibble(
+      aba = unique(.x$aba),
+      n_linhas_validas = unique(.x$.n_linhas_validas_aba),
+      n_tilapias = unique(.x$.n_tilapias_aba),
+      prioridade = unique(.x$.prioridade_aba)
     )
+  ) %>%
+    mutate(
+      tem_tilapia = n_tilapias > 0,
+      resumo_aba = paste0(aba, " [linhas=", n_linhas_validas, "; tilápias=", n_tilapias, "]")
+    ) %>%
+    arrange(
+      desc(tem_tilapia),
+      desc(n_tilapias),
+      prioridade,
+      desc(n_linhas_validas)
+    )
+  
+  # Escolhe uma única aba por arquivo para evitar duplicação.
+  # Critério corrigido:
+  #   1) primeiro escolhe abas que contenham tilápias, incluindo o código "tilapi";
+  #   2) entre elas, escolhe a aba com maior número de registros de tilápia;
+  #   3) em caso de empate, usa a prioridade do nome da aba;
+  #   4) se nenhuma aba tiver tilápia, usa a aba com mais linhas válidas.
+  #
+  # Isso corrige o problema de anos como 2008, 2009, 2011 e 2014 ficarem zerados
+  # quando o script escolhia uma aba maior, mas sem os registros codificados como "tilapi".
+  aba_escolhida <- diagnostico_abas$aba[1]
+  resumo_abas <- paste(diagnostico_abas$resumo_aba, collapse = "; ")
+  abas_com_tilapia <- diagnostico_abas %>%
+    filter(n_tilapias > 0) %>%
+    pull(aba) %>%
+    paste(collapse = "; ")
+  
+  idx_escolhida <- which(purrr::map_chr(abas_lidas, ~ unique(.x$aba)) == aba_escolhida)[1]
+  
+  out_final <- abas_lidas[[idx_escolhida]] %>%
+    mutate(
+      abas_validas_no_arquivo = paste(diagnostico_abas$aba, collapse = "; "),
+      resumo_abas_validas_no_arquivo = resumo_abas,
+      abas_com_tilapia_no_arquivo = ifelse(abas_com_tilapia == "", NA_character_, abas_com_tilapia),
+      aba_escolhida = aba_escolhida,
+      n_abas_validas_no_arquivo = nrow(diagnostico_abas),
+      n_tilapias_aba_escolhida = diagnostico_abas$n_tilapias[diagnostico_abas$aba == aba_escolhida][1],
+      criterio_escolha_aba = ifelse(
+        n_tilapias_aba_escolhida > 0,
+        "Aba com maior número de registros de tilápia, incluindo código tilapi",
+        "Nenhuma aba tinha tilápia; escolhida aba com mais linhas válidas"
+      )
+    ) %>%
+    select(-.n_linhas_validas_aba, -.n_tilapias_aba, -.prioridade_aba)
+  
+  out_final
 }
 
 # ======================
@@ -321,7 +498,7 @@ ler_rendimento_ano <- function(arquivo) {
 
 arquivos_rendimento <- list.files(
   pasta,
-  pattern = "^Rendimento\\s*\\d{4}\\.(xlsx|xlsm)$",
+  pattern = "^Rendimento\\s*\\d{4}\\.(xls|xlsx|xlsm)$",
   full.names = TRUE,
   recursive = TRUE,
   ignore.case = TRUE
@@ -330,14 +507,28 @@ arquivos_rendimento <- list.files(
 arquivos_rendimento <- arquivos_rendimento[
   str_extract(basename(arquivos_rendimento), "\\d{4}") %>%
     as.integer() %>%
-    between(1988, 2025)
+    between(min(anos_monitoramento), max(anos_monitoramento))
 ]
 
 if (length(arquivos_rendimento) == 0) {
   stop(
-    "Nenhum arquivo no padrão 'Rendimento YYYY.xlsx' ou 'Rendimento YYYY.xlsm' foi encontrado na pasta ou subpastas."
+    "Nenhum arquivo no padrão 'Rendimento YYYY.xls', 'Rendimento YYYY.xlsx' ou 'Rendimento YYYY.xlsm' foi encontrado na pasta ou subpastas."
   )
 }
+
+
+diagnostico_arquivos_rendimento <- tibble(
+  arquivo = basename(arquivos_rendimento),
+  caminho_arquivo = arquivos_rendimento,
+  ano = str_extract(basename(arquivos_rendimento), "\\d{4}") %>% as.integer(),
+  extensao = tools::file_ext(arquivos_rendimento)
+) %>%
+  arrange(ano, arquivo)
+
+readr::write_csv2(
+  diagnostico_arquivos_rendimento,
+  file.path(out_dir, "tabelas", "diagnostico_arquivos_rendimento_lidos.csv")
+)
 
 dados_rendimento <- purrr::map_dfr(arquivos_rendimento, ler_rendimento_ano)
 
@@ -346,22 +537,319 @@ if (nrow(dados_rendimento) == 0) {
 }
 
 # ======================
+# 4A. Correção espacial usando TILÁPIAS Biometria 1998_2025.xlsx
+# ======================
+
+caminho_biometria_ref <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/TILÁPIAS Biometria 1998_2025.xlsx"
+
+limpar_valor_local <- function(x) {
+  x_chr <- x %>%
+    as.character() %>%
+    str_squish() %>%
+    str_replace_all("^Área\\s*", "") %>%
+    str_replace_all("^Area\\s*", "") %>%
+    str_replace_all("^Ponto\\s*", "") %>%
+    str_replace_all("^Zona\\s*", "") %>%
+    str_squish()
+  
+  x_chr[x_chr == ""] <- NA_character_
+  x_chr[toupper(stringi::stri_trans_general(x_chr, "Latin-ASCII")) %in%
+          c("NA", "NAN", "NAO INFORMADO", "NÃO INFORMADO", "NULL")] <- NA_character_
+  
+  x_chr
+}
+
+limpar_chave_local <- function(x) {
+  limpar_valor_local(x) %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    str_to_upper() %>%
+    str_squish()
+}
+
+moda_valida <- function(x) {
+  y <- x[!is.na(x) & x != "" & x != "Não informado"]
+  if (length(y) == 0) return(NA_character_)
+  
+  names(sort(table(y), decreasing = TRUE))[1]
+}
+
+if (!file.exists(caminho_biometria_ref)) {
+  stop("Arquivo de referência espacial não encontrado: ", caminho_biometria_ref)
+}
+
+ref_biometria <- suppressWarnings(
+  readxl::read_excel(caminho_biometria_ref, sheet = "Planilha1", col_types = "text")
+) %>%
+  janitor::clean_names()
+
+if (!all(c("area", "zona", "ponto") %in% names(ref_biometria))) {
+  stop(
+    "A Planilha1 do arquivo de biometria precisa conter as colunas AREA, ZONA e PONTO. ",
+    "Colunas encontradas: ",
+    paste(names(ref_biometria), collapse = ", ")
+  )
+}
+
+ref_espacial <- ref_biometria %>%
+  transmute(
+    area_ref = limpar_valor_local(area),
+    ponto_ref = limpar_valor_local(ponto),
+    zona_ref = padronizar_zona(zona),
+    
+    area_key = limpar_chave_local(area),
+    ponto_key = limpar_chave_local(ponto)
+  ) %>%
+  filter(!is.na(area_key) | !is.na(ponto_key)) %>%
+  distinct()
+
+# Referência por combinação AREA + PONTO
+# Essa é a correção mais segura.
+ref_area_ponto <- ref_espacial %>%
+  filter(!is.na(area_key), !is.na(ponto_key)) %>%
+  count(area_key, ponto_key, area_ref, ponto_ref, zona_ref, name = "n") %>%
+  group_by(area_key, ponto_key) %>%
+  slice_max(order_by = n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    area_key,
+    ponto_key,
+    area_ref_area_ponto = area_ref,
+    ponto_ref_area_ponto = ponto_ref,
+    zona_ref_area_ponto = zona_ref
+  )
+
+# Referência por PONTO apenas.
+# Só será usada quando o ponto aparecer associado a uma única área e uma única zona.
+ref_ponto_unico <- ref_espacial %>%
+  filter(!is.na(ponto_key)) %>%
+  group_by(ponto_key) %>%
+  summarise(
+    n_area_ref = n_distinct(area_key[!is.na(area_key)]),
+    n_zona_ref = n_distinct(zona_ref[!is.na(zona_ref) & zona_ref != "Não informado"]),
+    area_ref_ponto = moda_valida(area_ref),
+    ponto_ref_ponto = moda_valida(ponto_ref),
+    zona_ref_ponto = moda_valida(zona_ref),
+    .groups = "drop"
+  ) %>%
+  filter(n_area_ref == 1, n_zona_ref == 1)
+
+# Referência por AREA.
+# Usada para corrigir principalmente a ZONA quando o ponto estiver ausente ou ambíguo.
+ref_area <- ref_espacial %>%
+  filter(!is.na(area_key)) %>%
+  group_by(area_key) %>%
+  summarise(
+    area_ref_area = moda_valida(area_ref),
+    zona_ref_area = moda_valida(zona_ref),
+    n_zona_ref_area = n_distinct(zona_ref[!is.na(zona_ref) & zona_ref != "Não informado"]),
+    .groups = "drop"
+  )
+
+# Diagnóstico de áreas que aparecem em mais de uma zona na referência
+diagnostico_areas_multizona_biometria <- ref_area %>%
+  filter(n_zona_ref_area > 1)
+
+readr::write_csv2(
+  diagnostico_areas_multizona_biometria,
+  file.path(out_dir, "tabelas", "diagnostico_areas_multizona_biometria.csv")
+)
+
+# Aplicar correção aos dados de rendimento
+dados_rendimento <- dados_rendimento %>%
+  mutate(
+    zona_original_pre_correcao = zona,
+    area_original_pre_correcao = area,
+    ponto_original_pre_correcao = ponto,
+    
+    area_key = limpar_chave_local(area),
+    ponto_key = limpar_chave_local(ponto),
+    
+    area_original_limpa = limpar_valor_local(area),
+    ponto_original_limpo = limpar_valor_local(ponto),
+    zona_original_limpa = padronizar_zona(zona),
+    zona_original_limpa = ifelse(zona_original_limpa == "Não informado", NA_character_, zona_original_limpa)
+  ) %>%
+  left_join(
+    ref_area_ponto,
+    by = c("area_key", "ponto_key")
+  ) %>%
+  left_join(
+    ref_ponto_unico,
+    by = "ponto_key"
+  ) %>%
+  left_join(
+    ref_area,
+    by = "area_key"
+  ) %>%
+  mutate(
+    area = coalesce(
+      area_ref_area_ponto,
+      area_ref_ponto,
+      area_ref_area,
+      area_original_limpa,
+      "Não informado"
+    ),
+    
+    ponto = coalesce(
+      ponto_ref_area_ponto,
+      ponto_ref_ponto,
+      ponto_original_limpo,
+      "Não informado"
+    ),
+    
+    zona = coalesce(
+      zona_ref_area_ponto,
+      zona_ref_ponto,
+      zona_ref_area,
+      zona_original_limpa,
+      "Não informado"
+    ),
+    
+    metodo_correcao_espacial = case_when(
+      !is.na(zona_ref_area_ponto) ~ "AREA + PONTO",
+      !is.na(zona_ref_ponto) ~ "PONTO único na biometria",
+      !is.na(zona_ref_area) ~ "AREA",
+      TRUE ~ "Sem referência na biometria"
+    )
+  ) %>%
+  select(
+    -area_key,
+    -ponto_key,
+    -area_original_limpa,
+    -ponto_original_limpo,
+    -zona_original_limpa,
+    -area_ref_area_ponto,
+    -ponto_ref_area_ponto,
+    -zona_ref_area_ponto,
+    -area_ref_ponto,
+    -ponto_ref_ponto,
+    -zona_ref_ponto,
+    -area_ref_area,
+    -zona_ref_area,
+    -n_area_ref,
+    -n_zona_ref,
+    -n_zona_ref_area
+  )
+
+# Salvar referência usada
+readr::write_csv2(
+  ref_espacial,
+  file.path(out_dir, "tabelas", "referencia_espacial_biometria_usada.csv")
+)
+
+# Diagnóstico da correção aplicada
+diagnostico_correcao_espacial <- dados_rendimento %>%
+  count(
+    zona_original_pre_correcao,
+    area_original_pre_correcao,
+    ponto_original_pre_correcao,
+    zona,
+    area,
+    ponto,
+    metodo_correcao_espacial,
+    name = "n"
+  ) %>%
+  arrange(desc(n))
+
+readr::write_csv2(
+  diagnostico_correcao_espacial,
+  file.path(out_dir, "tabelas", "diagnostico_correcao_espacial_rendimento.csv")
+)
+
+# Locais que continuaram sem referência direta na biometria
+locais_sem_referencia_biometria <- dados_rendimento %>%
+  filter(metodo_correcao_espacial == "Sem referência na biometria") %>%
+  count(
+    zona_original_pre_correcao,
+    area_original_pre_correcao,
+    ponto_original_pre_correcao,
+    name = "n"
+  ) %>%
+  arrange(desc(n))
+
+readr::write_csv2(
+  locais_sem_referencia_biometria,
+  file.path(out_dir, "tabelas", "locais_rendimento_sem_referencia_biometria.csv")
+)
+
+# ======================
 # 5. Diagnóstico das espécies e filtro de tilápias
 # ======================
 
 diagnostico_especies_rendimento <- dados_rendimento %>%
-  distinct(ano, especie_original, especie_limpa, is_tilapia, arquivo, aba) %>%
-  arrange(ano, especie_limpa)
+  group_by(
+    ano,
+    especie_original,
+    especie_limpa,
+    especie_codigo_normalizado,
+    grupo_especie_rendimento,
+    is_tilapia,
+    arquivo,
+    aba
+  ) %>%
+  summarise(
+    n_registros = n(),
+    rendimento_total = sum(semanatot, na.rm = TRUE),
+    n_com_cpue = sum(!is.na(cpue)),
+    .groups = "drop"
+  ) %>%
+  arrange(ano, desc(is_tilapia), especie_limpa)
 
-readr::write_csv(
+readr::write_csv2(
   diagnostico_especies_rendimento,
   file.path(out_dir, "tabelas", "diagnostico_especies_rendimento.csv")
 )
 
 print(diagnostico_especies_rendimento)
 
+# Diagnóstico de todas as grafias/códigos reconhecidos como tilápia.
+# Use esta tabela para verificar se "tilapi" aparece em todos os anos esperados, incluindo arquivos .xls.
+diagnostico_codigos_tilapia_todos_anos <- dados_rendimento %>%
+  filter(is_tilapia) %>%
+  group_by(ano, especie_original, especie_limpa, especie_codigo_normalizado, arquivo, aba) %>%
+  summarise(
+    n_registros = n(),
+    rendimento_total = sum(semanatot, na.rm = TRUE),
+    dias_total_original = sum(diastot_original, na.rm = TRUE),
+    dias_total_usado_cpue = sum(diastot, na.rm = TRUE),
+    n_cpue = sum(!is.na(cpue)),
+    .groups = "drop"
+  ) %>%
+  arrange(ano, especie_codigo_normalizado)
+
+readr::write_csv2(
+  diagnostico_codigos_tilapia_todos_anos,
+  file.path(out_dir, "tabelas", "diagnostico_codigos_tilapia_todos_anos.csv")
+)
+
+print(diagnostico_codigos_tilapia_todos_anos)
+
+# Diagnóstico das abas escolhidas por arquivo, para detectar se algum arquivo tinha
+# mais de uma aba válida e qual delas foi usada.
+diagnostico_abas_rendimento <- dados_rendimento %>%
+  distinct(
+    ano,
+    arquivo,
+    aba,
+    aba_escolhida,
+    criterio_escolha_aba,
+    n_tilapias_aba_escolhida,
+    abas_com_tilapia_no_arquivo,
+    abas_validas_no_arquivo,
+    resumo_abas_validas_no_arquivo,
+    n_abas_validas_no_arquivo
+  ) %>%
+  arrange(ano, arquivo)
+
+readr::write_csv2(
+  diagnostico_abas_rendimento,
+  file.path(out_dir, "tabelas", "diagnostico_abas_rendimento.csv")
+)
+
+# Filtro final de tilápias: inclui códigos e sinônimos em todos os anos,
+# especialmente "tilapi".
 rendimento_tilapia <- dados_rendimento %>%
-  filter(is_tilapia)
+  filter(grupo_especie_rendimento == "Tilápias")
 
 if (nrow(rendimento_tilapia) == 0) {
   stop(
@@ -369,6 +857,27 @@ if (nrow(rendimento_tilapia) == 0) {
     "Verifique a tabela 'diagnostico_especies_rendimento.csv' para conferir os nomes/acrônimos em ESPECIE."
   )
 }
+
+# Diagnóstico específico do código tilapi em qualquer ano, não apenas 2008 e 2009.
+diagnostico_tilapi_todos_anos <- dados_rendimento %>%
+  filter(str_detect(especie_codigo_normalizado, "^tilapi")) %>%
+  group_by(ano, especie_original, especie_limpa, especie_codigo_normalizado, is_tilapia, observacao_cpue) %>%
+  summarise(
+    n_registros = n(),
+    rendimento_total = sum(semanatot, na.rm = TRUE),
+    dias_total_original = sum(diastot_original, na.rm = TRUE),
+    dias_total_usado_cpue = sum(diastot, na.rm = TRUE),
+    n_cpue = sum(!is.na(cpue)),
+    .groups = "drop"
+  ) %>%
+  arrange(ano, especie_codigo_normalizado)
+
+readr::write_csv2(
+  diagnostico_tilapi_todos_anos,
+  file.path(out_dir, "tabelas", "diagnostico_tilapi_todos_anos.csv")
+)
+
+print(diagnostico_tilapi_todos_anos)
 
 # ======================
 # 6. Funções de resumo
@@ -380,19 +889,24 @@ resumir_cpue <- function(.data, ...) {
     summarise(
       rendimento_total = sum(semanatot, na.rm = TRUE),
       dias_total = sum(diastot, na.rm = TRUE),
-      
-      cpue_media = mean(cpue, na.rm = TRUE),
-      cpue_dp = sd(cpue, na.rm = TRUE),
+      cpue_media_raw = mean(cpue, na.rm = TRUE),
+      cpue_dp_raw = sd(cpue, na.rm = TRUE),
       n_cpue = sum(!is.na(cpue)),
-      cpue_se = ifelse(n_cpue > 1, cpue_dp / sqrt(n_cpue), NA_real_),
-      cpue_lwr = ifelse(is.na(cpue_se), NA_real_, pmax(cpue_media - cpue_se, 0)),
-      cpue_upr = ifelse(is.na(cpue_se), NA_real_, cpue_media + cpue_se),
-      
       cpue_agregada = ifelse(dias_total > 0, rendimento_total / dias_total, NA_real_),
-      
       n_registros = n(),
       n_pescadores = n_distinct(pescador_cod[pescador_cod != "" & !is.na(pescador_cod)]),
       .groups = "drop"
+    ) %>%
+    mutate(
+      cpue_media = ifelse(n_cpue > 0, cpue_media_raw, NA_real_),
+      cpue_dp = ifelse(n_cpue > 1, cpue_dp_raw, NA_real_),
+      cpue_se = ifelse(n_cpue > 1, cpue_dp / sqrt(n_cpue), NA_real_),
+      cpue_lwr = ifelse(is.na(cpue_se), NA_real_, pmax(cpue_media - cpue_se, 0)),
+      cpue_upr = ifelse(is.na(cpue_se), NA_real_, cpue_media + cpue_se)
+    ) %>%
+    select(
+      -cpue_media_raw,
+      -cpue_dp_raw
     )
 }
 
@@ -423,9 +937,13 @@ resumo_geral <- rendimento_tilapia %>%
     n_meses = n_distinct(mes_num[!is.na(mes_num)])
   )
 
-tab_cpue_ano <- rendimento_tilapia %>%
-  resumir_cpue(ano) %>%
-  arrange(ano)
+tab_cpue_ano <- tibble(ano = anos_monitoramento) %>%
+  left_join(
+    rendimento_tilapia %>%
+      resumir_cpue(ano) %>%
+      arrange(ano),
+    by = "ano"
+  )
 
 tab_cpue_mes <- rendimento_tilapia %>%
   filter(!is.na(mes_num)) %>%
@@ -449,16 +967,25 @@ tab_cpue_ponto <- rendimento_tilapia %>%
   resumir_cpue(ano, zona, area, ponto) %>%
   arrange(desc(cpue_media))
 
-tab_rendimento_ano <- rendimento_tilapia %>%
-  group_by(ano) %>%
-  summarise(
-    rendimento_total = sum(semanatot, na.rm = TRUE),
-    dias_total = sum(diastot, na.rm = TRUE),
-    cpue_agregada = ifelse(dias_total > 0, rendimento_total / dias_total, NA_real_),
-    n_registros = n(),
-    .groups = "drop"
+tab_rendimento_ano <- tibble(ano = anos_monitoramento) %>%
+  left_join(
+    rendimento_tilapia %>%
+      group_by(ano) %>%
+      summarise(
+        rendimento_total = sum(semanatot, na.rm = TRUE),
+        dias_total = sum(diastot, na.rm = TRUE),
+        cpue_agregada = ifelse(dias_total > 0, rendimento_total / dias_total, NA_real_),
+        n_registros = n(),
+        .groups = "drop"
+      ) %>%
+      arrange(ano),
+    by = "ano"
   ) %>%
-  arrange(ano)
+  mutate(
+    rendimento_total = replace_na(rendimento_total, 0),
+    dias_total = replace_na(dias_total, 0),
+    n_registros = replace_na(n_registros, 0)
+  )
 
 tab_rendimento_mes <- rendimento_tilapia %>%
   filter(!is.na(mes_num)) %>%
@@ -487,17 +1014,26 @@ tab_rendimento_zona <- rendimento_tilapia %>%
   ) %>%
   ungroup()
 
-tab_esforco_total <- dados_rendimento %>%
-  group_by(ano) %>%
-  summarise(
-    rendimento_total_todas_especies = sum(semanatot, na.rm = TRUE),
-    .groups = "drop"
+tab_esforco_total <- tibble(ano = anos_monitoramento) %>%
+  left_join(
+    dados_rendimento %>%
+      group_by(ano) %>%
+      summarise(
+        rendimento_total_todas_especies = sum(semanatot, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = "ano"
   )
 
 tab_relativo_tilapia_rendimento <- tab_rendimento_ano %>%
   left_join(tab_esforco_total, by = "ano") %>%
   mutate(
-    percentual_tilapia_rendimento = 100 * rendimento_total / rendimento_total_todas_especies
+    percentual_tilapia_rendimento = ifelse(
+      !is.na(rendimento_total_todas_especies) &
+        rendimento_total_todas_especies > 0,
+      100 * rendimento_total / rendimento_total_todas_especies,
+      NA_real_
+    )
   )
 
 disponibilidade_arquivo <- dados_rendimento %>%
@@ -529,6 +1065,10 @@ write_xlsx(
     rendimento_relativo_total = tab_relativo_tilapia_rendimento,
     disponibilidade_arquivo = disponibilidade_arquivo,
     diagnostico_especies = diagnostico_especies_rendimento,
+    diagnostico_tilapi_todos_anos = diagnostico_tilapi_todos_anos,
+    diagnostico_codigos_tilapia = diagnostico_codigos_tilapia_todos_anos,
+    diagnostico_arquivos_lidos = diagnostico_arquivos_rendimento,
+    diagnostico_abas = diagnostico_abas_rendimento,
     registros_tilapia = rendimento_tilapia,
     registros_todos = dados_rendimento
   ),
@@ -539,26 +1079,40 @@ write_xlsx(
 # 9. Gráficos de CPUE anual
 # ======================
 
-g_cpue_anual <- tab_cpue_ano %>%
-  filter(!is.na(cpue_media)) %>%
-  ggplot(aes(x = ano, y = cpue_media)) +
+tab_cpue_ano_linha <- tab_cpue_ano %>%
+  filter(!is.na(cpue_media))
+
+g_cpue_anual <- ggplot(tab_cpue_ano, aes(x = ano, y = cpue_media)) +
   geom_ribbon(
+    data = tab_cpue_ano_linha,
     aes(ymin = cpue_lwr, ymax = cpue_upr),
     alpha = 0.25
   ) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 2.3) +
+  geom_line(
+    data = tab_cpue_ano_linha,
+    aes(x = ano, y = cpue_media),
+    linewidth = 1
+  ) +
+  geom_point(
+    data = tab_cpue_ano_linha,
+    aes(x = ano, y = cpue_media),
+    size = 2.3
+  ) +
   scale_x_continuous(
-    limits = c(1987.5, max(tab_cpue_ano$ano, na.rm = TRUE) + 1),
-    breaks = seq(1988, max(tab_cpue_ano$ano, na.rm = TRUE), by = 1),
+    limits = c(min(anos_monitoramento) - 0.5, max(anos_monitoramento) + 0.5),
+    breaks = anos_monitoramento,
     expand = expansion(mult = c(0.01, 0.01))
   ) +
-  eixo_y_temporal(n = 10, expand_top = 0.10) +
+  scale_y_continuous(
+    limits = c(0, NA),
+    breaks = scales::breaks_pretty(n = 10),
+    labels = label_num_pt(digits = 2),
+    expand = expansion(mult = c(0, 0.10))
+  ) +
   labs(
     x = "Ano",
     y = "CPUE média de tilápias (kg/pescador*dia)",
-    title = "Série histórica da CPUE de tilápias",
-    subtitle = "CPUE calculada como SEMANATOT / DIASTOT; faixa sombreada = ± 1 erro padrão"
+    title = "Série histórica da CPUE de tilápias"
   ) +
   tema +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -568,28 +1122,27 @@ ggsave(
   g_cpue_anual,
   width = 12,
   height = 5.8,
-  dpi = 300
+  dpi = 300,
+  bg = "white"
 )
 
-g_cpue_anual_barras <- tab_cpue_ano %>%
-  filter(!is.na(cpue_media)) %>%
-  ggplot(aes(x = ano, y = cpue_media)) +
-  geom_col(fill = "grey60", color = "black") +
+g_cpue_anual_barras <- ggplot(tab_cpue_ano, aes(x = ano, y = cpue_media)) +
+  geom_col(fill = "grey60", color = "black", na.rm = TRUE) +
   geom_errorbar(
     aes(ymin = cpue_lwr, ymax = cpue_upr),
-    width = 0.25
+    width = 0.25,
+    na.rm = TRUE
   ) +
   scale_x_continuous(
-    limits = c(1987.5, max(tab_cpue_ano$ano, na.rm = TRUE) + 1),
-    breaks = seq(1988, max(tab_cpue_ano$ano, na.rm = TRUE), by = 1),
+    limits = c(min(anos_monitoramento) - 0.5, max(anos_monitoramento) + 0.5),
+    breaks = anos_monitoramento,
     expand = expansion(mult = c(0, 0))
   ) +
   eixo_y_temporal(n = 10, expand_top = 0.10) +
   labs(
     x = "Ano",
     y = "CPUE média de tilápias (kg/pescador*dia)",
-    title = "CPUE anual de tilápias",
-    subtitle = "Barras de erro representam ± 1 erro padrão"
+    title = "CPUE anual de tilápias"
   ) +
   tema +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -599,7 +1152,8 @@ ggsave(
   g_cpue_anual_barras,
   width = 13,
   height = 5.8,
-  dpi = 300
+  dpi = 300,
+  bg = "white"
 )
 
 # ======================
@@ -631,7 +1185,8 @@ if (nrow(tab_cpue_mes) > 0) {
     g_cpue_mensal,
     width = 10,
     height = 5,
-    dpi = 300
+    dpi = 300,
+  bg = "white"
   )
 }
 
@@ -649,6 +1204,7 @@ if (nrow(tab_cpue_zona) > 0) {
     coord_flip() +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 2),
       expand = expansion(mult = c(0, 0.12))
     ) +
     labs(
@@ -664,14 +1220,15 @@ if (nrow(tab_cpue_zona) > 0) {
     g_cpue_zona,
     width = 10,
     height = 5.5,
-    dpi = 300
+    dpi = 300,
+  bg = "white"
   )
   
   g_heat_cpue_zona_ano <- tab_cpue_zona %>%
     ggplot(aes(x = factor(ano), y = zona, fill = cpue_media)) +
-    geom_tile(color = "white") +
-    geom_text(aes(label = round(cpue_media, 2)), size = 3) +
-    scale_fill_gradient(low = "grey95", high = "grey20") +
+    geom_tile(color = NA) +
+    geom_text(aes(label = fmt_num_pt(cpue_media, digits = 2)), size = 3) +
+    scale_fill_gradient(low = "grey95", high = "grey20", labels = label_num_pt(digits = 2)) +
     labs(
       x = "Ano",
       y = "Zona",
@@ -685,7 +1242,8 @@ if (nrow(tab_cpue_zona) > 0) {
     g_heat_cpue_zona_ano,
     width = 8,
     height = 5.5,
-    dpi = 300
+    dpi = 300,
+  bg = "white"
   )
 }
 
@@ -693,9 +1251,9 @@ if (nrow(tab_cpue_zona_mes) > 0) {
   
   g_heat_cpue_zona_mes <- tab_cpue_zona_mes %>%
     ggplot(aes(x = mes_nome, y = zona, fill = cpue_media)) +
-    geom_tile(color = "white") +
-    geom_text(aes(label = round(cpue_media, 2)), size = 3) +
-    scale_fill_gradient(low = "grey95", high = "grey20") +
+    geom_tile(color = NA) +
+    geom_text(aes(label = fmt_num_pt(cpue_media, digits = 2)), size = 3) +
+    scale_fill_gradient(low = "grey95", high = "grey20", labels = label_num_pt(digits = 2)) +
     facet_wrap(~ ano, ncol = 1) +
     labs(
       x = "Mês",
@@ -710,7 +1268,8 @@ if (nrow(tab_cpue_zona_mes) > 0) {
     g_heat_cpue_zona_mes,
     width = 9,
     height = 8,
-    dpi = 300
+    dpi = 300,
+  bg = "white"
   )
 }
 
@@ -722,13 +1281,13 @@ g_rendimento_ano <- tab_rendimento_ano %>%
   ggplot(aes(x = ano, y = rendimento_total)) +
   geom_col(fill = "grey60", color = "black") +
   geom_text(
-    aes(label = round(rendimento_total, 1)),
+    aes(label = ifelse(rendimento_total > 0, fmt_num_pt(rendimento_total, digits = 1), "")),
     vjust = -0.3,
     size = 3.5
   ) +
   scale_x_continuous(
-    limits = c(1987.5, max(tab_rendimento_ano$ano, na.rm = TRUE) + 1),
-    breaks = seq(1988, max(tab_rendimento_ano$ano, na.rm = TRUE), by = 1),
+    limits = c(min(anos_monitoramento) - 0.5, max(anos_monitoramento) + 0.5),
+    breaks = anos_monitoramento,
     expand = expansion(mult = c(0, 0))
   ) +
   eixo_y_temporal(n = 10, expand_top = 0.15) +
@@ -745,20 +1304,25 @@ ggsave(
   g_rendimento_ano,
   width = 12,
   height = 5.5,
-  dpi = 300
+  dpi = 300,
+  bg = "white"
 )
 
 g_rendimento_relativo <- tab_relativo_tilapia_rendimento %>%
   ggplot(aes(x = ano, y = percentual_tilapia_rendimento)) +
   geom_col(fill = "grey60", color = "black") +
   geom_text(
-    aes(label = sprintf("%.2f%%", percentual_tilapia_rendimento)),
+    aes(label = ifelse(
+      !is.na(percentual_tilapia_rendimento),
+      fmt_percent_pt(percentual_tilapia_rendimento, digits = 2, drop0 = FALSE),
+      ""
+    )),
     vjust = -0.3,
     size = 3.5
   ) +
   scale_x_continuous(
-    limits = c(1987.5, max(tab_rendimento_ano$ano, na.rm = TRUE) + 1),
-    breaks = seq(1988, max(tab_rendimento_ano$ano, na.rm = TRUE), by = 1),
+    limits = c(min(anos_monitoramento) - 0.5, max(anos_monitoramento) + 0.5),
+    breaks = anos_monitoramento,
     expand = expansion(mult = c(0, 0))
   ) +
   eixo_y_temporal_percentual(n = 10, expand_top = 0.15) +
@@ -775,7 +1339,8 @@ ggsave(
   g_rendimento_relativo,
   width = 12,
   height = 5.5,
-  dpi = 300
+  dpi = 300,
+  bg = "white"
 )
 
 if (nrow(tab_rendimento_zona) > 0) {
@@ -786,6 +1351,7 @@ if (nrow(tab_rendimento_zona) > 0) {
     coord_flip() +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 1),
       expand = expansion(mult = c(0, 0.12))
     ) +
     labs(
@@ -801,7 +1367,8 @@ if (nrow(tab_rendimento_zona) > 0) {
     g_rendimento_zona,
     width = 10,
     height = 5.5,
-    dpi = 300
+    dpi = 300,
+  bg = "white"
   )
 }
 
@@ -812,7 +1379,14 @@ if (nrow(tab_rendimento_zona) > 0) {
 if (any(!is.na(tab_cpue_area$area) & tab_cpue_area$area != "Não informado")) {
   
   top_areas_cpue <- tab_cpue_area %>%
-    filter(!is.na(cpue_media), n_cpue >= 2) %>%
+    filter(
+      !is.na(cpue_media),
+      n_cpue >= 2,
+      !is.na(area),
+      !is.na(zona),
+      area != "Não informado",
+      zona != "Não informado"
+    ) %>%
     group_by(zona, area) %>%
     summarise(
       cpue_media = mean(cpue_media, na.rm = TRUE),
@@ -827,10 +1401,11 @@ if (any(!is.na(tab_cpue_area$area) & tab_cpue_area$area != "Não informado")) {
     mutate(area_label = fct_reorder(area_label, cpue_media)) %>%
     ggplot(aes(x = area_label, y = cpue_media)) +
     geom_col(fill = "grey60", color = "black") +
-    geom_text(aes(label = round(cpue_media, 2)), hjust = -0.15, size = 3.5) +
+    geom_text(aes(label = fmt_num_pt(cpue_media, digits = 2)), hjust = -0.15, size = 3.5) +
     coord_flip() +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 2),
       expand = expansion(mult = c(0, 0.18))
     ) +
     labs(
@@ -845,14 +1420,24 @@ if (any(!is.na(tab_cpue_area$area) & tab_cpue_area$area != "Não informado")) {
     g_top_areas_cpue,
     width = 9,
     height = 6,
-    dpi = 300
+    dpi = 300,
+  bg = "white"
   )
 }
 
 if (any(!is.na(tab_cpue_ponto$ponto) & tab_cpue_ponto$ponto != "Não informado")) {
   
   top_pontos_cpue <- tab_cpue_ponto %>%
-    filter(!is.na(cpue_media), n_cpue >= 2) %>%
+    filter(
+      !is.na(cpue_media),
+      n_cpue >= 2,
+      !is.na(ponto),
+      !is.na(area),
+      !is.na(zona),
+      ponto != "Não informado",
+      area != "Não informado",
+      zona != "Não informado"
+    ) %>%
     group_by(zona, area, ponto) %>%
     summarise(
       cpue_media = mean(cpue_media, na.rm = TRUE),
@@ -867,10 +1452,11 @@ if (any(!is.na(tab_cpue_ponto$ponto) & tab_cpue_ponto$ponto != "Não informado")
     mutate(ponto_label = fct_reorder(ponto_label, cpue_media)) %>%
     ggplot(aes(x = ponto_label, y = cpue_media)) +
     geom_col(fill = "grey60", color = "black") +
-    geom_text(aes(label = round(cpue_media, 2)), hjust = -0.15, size = 3.5) +
+    geom_text(aes(label = fmt_num_pt(cpue_media, digits = 2)), hjust = -0.15, size = 3.5) +
     coord_flip() +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 2),
       expand = expansion(mult = c(0, 0.18))
     ) +
     labs(
@@ -885,7 +1471,8 @@ if (any(!is.na(tab_cpue_ponto$ponto) & tab_cpue_ponto$ponto != "Não informado")
     g_top_pontos_cpue,
     width = 10,
     height = 7,
-    dpi = 300
+    dpi = 300,
+  bg = "white"
   )
 }
 
