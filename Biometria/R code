@@ -1,5 +1,5 @@
 # ============================================================
-# Espécies de tilápias — gráficos de estabelecimento, 1988–2025
+# Espécies de tilápias — gráficos de estabelecimento, 1998–2025
 # Espécies-alvo:
 #   1) Oreochromis niloticus
 #   2) Coptodon rendalli
@@ -38,7 +38,10 @@ suppressPackageStartupMessages({
 
 pasta <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/Dados biopesca"
 
-out_dir <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/saidas_tilapias_1988_2025"
+ano_inicio <- 1998
+ano_fim <- 2025
+
+out_dir <- "C:/Users/lg_ri/Desktop/Monitoramento Tilapia/saidas_tilapias_1998_2025"
 dir.create(out_dir, showWarnings = FALSE)
 dir.create(file.path(out_dir, "figuras"), showWarnings = FALSE)
 dir.create(file.path(out_dir, "tabelas"), showWarnings = FALSE)
@@ -467,7 +470,7 @@ ler_dado <- function(arq) {
 }
 
 # ======================
-# 4. Ler todos os arquivos, 1988–2025
+# 4. Ler todos os arquivos, 1998–2025
 # ======================
 
 arquivos <- list.files(
@@ -479,11 +482,11 @@ arquivos <- list.files(
 arquivos <- arquivos[
   str_extract(basename(arquivos), "\\d{4}") %>%
     as.integer() %>%
-    between(1988, 2025)
+    between(ano_inicio, ano_fim)
 ]
 
 if (length(arquivos) == 0) {
-  stop("Nenhum arquivo chamado 'Biopesca YYYY.xlsx' foi encontrado entre 1988 e 2025.")
+  stop("Nenhum arquivo chamado 'Biopesca YYYY.xlsx' foi encontrado entre 1998 e 2025.")
 }
 
 dados_lista <- lapply(arquivos, ler_dado) %>%
@@ -536,8 +539,8 @@ dados <- bind_rows(dados_lista) %>%
   ) %>%
   filter(
     !is.na(ANO),
-    ANO >= 1988,
-    ANO <= 2025,
+    ANO >= ano_inicio,
+    ANO <= ano_fim,
     !is.na(SPECIES_CLEAN),
     SPECIES_CLEAN != ""
   )
@@ -624,7 +627,7 @@ tilapias_individual <- dados %>%
 
 if (nrow(tilapias_individual) == 0) {
   stop(
-    "Nenhum registro de Oreochromis niloticus ou Coptodon rendalli foi encontrado entre 1988 e 2025. ",
+    "Nenhum registro de Oreochromis niloticus ou Coptodon rendalli foi encontrado entre 1998 e 2025. ",
     "Verifique o arquivo 'diagnostico_nomes_tilapias.csv' na pasta de saída."
   )
 }
@@ -788,11 +791,16 @@ tab_sexo <- dados_alvo %>%
   arrange(especie_alvo, SEXO)
 
 tab_estadio <- dados_alvo %>%
-  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "NÃO INFORMADO", ESTADIO)) %>%
-  mutate(ESTADIO = factor(ESTADIO, levels = estadio_levels)) %>%
-  count(especie_alvo, ESTADIO, name = "n") %>%
+  mutate(
+    ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "NÃO INFORMADO", ESTADIO),
+    ESTADIO = factor(ESTADIO, levels = estadio_levels),
+    especie_alvo = factor(especie_alvo, levels = niveis_alvo)
+  ) %>%
+  count(especie_alvo, ESTADIO, name = "n", .drop = FALSE) %>%
   group_by(especie_alvo) %>%
-  mutate(percentual = 100 * n / sum(n)) %>%
+  mutate(
+    percentual = ifelse(sum(n) > 0, 100 * n / sum(n), 0)
+  ) %>%
   ungroup() %>%
   arrange(especie_alvo, ESTADIO)
 
@@ -839,7 +847,7 @@ write_xlsx(
     registros_especies_alvo = dados_alvo,
     diagnostico_nomes = diagnostico_tilapias
   ),
-  file.path(out_dir, "tabelas", "tabelas_resumo_tilapias_1988_2025.xlsx")
+  file.path(out_dir, "tabelas", "tabelas_resumo_tilapias_1998_2025.xlsx")
 )
 
 # ======================
@@ -878,7 +886,7 @@ g_ano_n_side <- tab_ano %>%
   scale_fill_manual(values = species_colors) +
   scale_color_manual(values = species_colors) +
   scale_x_continuous(
-    breaks = seq(1988, 2025, by = 2),
+    breaks = seq(ano_inicio, ano_fim, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
   ) +
   scale_y_continuous(
@@ -915,7 +923,7 @@ g_ano_rel_side <- tab_ano %>%
   scale_fill_manual(values = species_colors) +
   scale_color_manual(values = species_colors) +
   scale_x_continuous(
-    breaks = seq(1988, 2025, by = 2),
+    breaks = seq(ano_inicio, ano_fim, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
   ) +
   scale_y_continuous(
@@ -953,7 +961,7 @@ g_acumulado_side <- tab_ano %>%
   facet_wrap(~ especie_alvo, ncol = 2) +
   scale_color_manual(values = species_colors) +
   scale_x_continuous(
-    breaks = seq(1988, 2025, by = 2),
+    breaks = seq(ano_inicio, ano_fim, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
   ) +
   scale_y_continuous(
@@ -986,7 +994,7 @@ g_heat_ano_mes_side <- tab_ano_mes %>%
   scale_fill_gradient(low = "grey95", high = "grey20") +
   facet_wrap(~ especie_alvo, ncol = 2) +
   scale_x_continuous(
-    breaks = seq(1988, 2025, by = 2),
+    breaks = seq(ano_inicio, ano_fim, by = 2),
     expand = c(0, 0)
   ) +
   labs(
@@ -1023,7 +1031,7 @@ g_mes_todos_side <- tab_mes_todos_anos %>%
   labs(
     x = "Mês",
     y = "Número de indivíduos",
-    title = "Abundância mensal das espécies-alvo de tilápia, 1988–2025"
+    title = "Abundância mensal das espécies-alvo de tilápia, 1998–2025"
   ) +
   tema +
   tema_sem_grade
@@ -1157,18 +1165,32 @@ ggsave(
 
 g_estadio_side <- tab_estadio %>%
   filter(especie_alvo %in% species_individual) %>%
-  mutate(ESTADIO = factor(as.character(ESTADIO), levels = rev(estadio_levels))) %>%
+  mutate(
+    ESTADIO = factor(as.character(ESTADIO), levels = rev(estadio_levels))
+  ) %>%
   ggplot(aes(x = ESTADIO, y = n, fill = ESTADIO)) +
   geom_col(color = "black") +
   geom_text(
-    aes(label = paste0(n, " (", fmt_percent_pt(percentual, digits = 1, drop0 = FALSE), ")")),
+    aes(label = ifelse(n > 0, as.character(n), "")),
     hjust = -0.1,
     size = 3.2
   ) +
   coord_flip() +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
-  scale_fill_manual(values = estadio_colors, drop = FALSE) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_fill_manual(
+    name = "Estágio",
+    values = estadio_colors,
+    breaks = estadio_levels,
+    drop = FALSE,
+    guide = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_continuous(
+    limits = c(0, NA),
+    breaks = scales::breaks_pretty(n = 8),
+    labels = label_num_pt(digits = 0),
+    expand = expansion(mult = c(0, 0.25))
+  ) +
   labs(
     x = "Estágio reprodutivo",
     y = "Número de indivíduos",
@@ -1176,11 +1198,18 @@ g_estadio_side <- tab_estadio %>%
   ) +
   tema +
   tema_sem_grade +
-  theme(legend.position = "bottom")
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal"
+  )
 
 ggsave(
   file.path(comparison_dir, "09_estagio_reprodutivo_lado_a_lado.png"),
-  g_estadio_side, width = 12.5, height = 5.8, dpi = 300,
+  g_estadio_side,
+  width = 13.5,
+  height = 5.8,
+  dpi = 300,
   bg = "white"
 )
 
@@ -1194,29 +1223,44 @@ g_estadio_ano_side <- tab_estadio_ano %>%
   ggplot(aes(x = ANO, y = n, fill = ESTADIO)) +
   geom_col(color = "black") +
   facet_wrap(~ especie_alvo, ncol = 2) +
-  scale_fill_manual(values = estadio_colors, breaks = estadio_levels, drop = FALSE) +
-  scale_x_continuous(
-    breaks = seq(1988, 2025, by = 2),
-    expand = expansion(mult = c(0.01, 0.01))
+  scale_fill_manual(
+    name = "Estágio",
+    values = estadio_colors,
+    breaks = estadio_levels,
+    drop = FALSE,
+    guide = guide_legend(nrow = 1, byrow = TRUE)
   ) +
+  scale_x_continuous(
+    breaks = seq(ano_inicio, ano_fim, by = 2),
+    labels = function(x) as.character(as.integer(x)),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) + 
   scale_y_continuous(
     limits = c(0, 16),
     breaks = seq(0, 16, by = 4),
+    labels = label_num_pt(digits = 0),
     expand = expansion(mult = c(0, 0.04))
   ) +
   labs(
     x = "Ano",
     y = "Número de indivíduos",
-    fill = "Estágio",
     title = "Estágios reprodutivos anuais das espécies-alvo de tilápia"
   ) +
   tema +
   tema_sem_grade +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal"
+  )
 
 ggsave(
   file.path(comparison_dir, "10_estagio_reprodutivo_por_ano_lado_a_lado.png"),
-  g_estadio_ano_side, width = 14, height = 6, dpi = 300,
+  g_estadio_ano_side,
+  width = 14.5,
+  height = 6,
+  dpi = 300,
   bg = "white"
 )
 
