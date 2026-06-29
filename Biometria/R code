@@ -14,6 +14,7 @@
 #   - As tabelas continuam incluindo cada espécie e ambas combinadas
 #   - Os gráficos principais mostram Oreochromis niloticus e Coptodon rendalli lado a lado
 #   - Não são mais geradas figuras independentes por espécie
+#   - As figuras lado a lado usam as cores das espécies sempre que possível
 # ============================================================
 
 suppressPackageStartupMessages({
@@ -200,6 +201,23 @@ label_num_pt <- function(digits = 2, drop0 = TRUE) {
 
 label_percent_pt <- function(digits = 2, drop0 = TRUE) {
   function(x) fmt_percent_pt(x, digits = digits, drop0 = drop0)
+}
+
+limite_superior_eixo_tamanho <- function(x, passo = 5) {
+  max_x <- max(x, na.rm = TRUE)
+  
+  if (!is.finite(max_x)) {
+    return(passo)
+  }
+  
+  limite <- ceiling(max_x / passo) * passo
+  
+  # Evita que o maior indivíduo fique exatamente encostado no limite do eixo.
+  if (limite <= max_x) {
+    limite <- limite + passo
+  }
+  
+  limite
 }
 
 tema_sem_grade <- theme(
@@ -885,13 +903,12 @@ tema <- theme_bw(base_size = 12) +
 
 g_ano_n_side <- tab_ano %>%
   filter(especie_alvo %in% species_individual) %>%
-  ggplot(aes(x = ANO, y = n_alvo, fill = especie_alvo, color = especie_alvo)) +
+  ggplot(aes(x = ANO, y = n_alvo, fill = especie_alvo)) +
   geom_col(width = 0.8, color = "black", show.legend = FALSE) +
-  geom_line(aes(group = 1), linewidth = 0.7, show.legend = FALSE) +
-  geom_point(size = 2, show.legend = FALSE) +
+  geom_line(aes(group = 1), color = "black", linewidth = 0.7, show.legend = FALSE) +
+  geom_point(shape = 21, color = "black", size = 2, show.legend = FALSE) +
   facet_wrap(~ especie_alvo, ncol = 2) +
   scale_fill_manual(values = species_colors) +
-  scale_color_manual(values = species_colors) +
   scale_x_continuous(
     breaks = seq(ano_inicio, ano_fim, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
@@ -922,13 +939,12 @@ ggsave(
 
 g_ano_rel_side <- tab_ano %>%
   filter(especie_alvo %in% species_individual) %>%
-  ggplot(aes(x = ANO, y = percentual_alvo, fill = especie_alvo, color = especie_alvo)) +
+  ggplot(aes(x = ANO, y = percentual_alvo, fill = especie_alvo)) +
   geom_col(width = 0.8, color = "black", show.legend = FALSE) +
-  geom_line(aes(group = 1), linewidth = 0.7, show.legend = FALSE) +
-  geom_point(size = 2, show.legend = FALSE) +
+  geom_line(aes(group = 1), color = "black", linewidth = 0.7, show.legend = FALSE) +
+  geom_point(shape = 21, color = "black", size = 2, show.legend = FALSE) +
   facet_wrap(~ especie_alvo, ncol = 2) +
   scale_fill_manual(values = species_colors) +
-  scale_color_manual(values = species_colors) +
   scale_x_continuous(
     breaks = seq(ano_inicio, ano_fim, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
@@ -962,11 +978,11 @@ g_acumulado_side <- tab_ano %>%
   arrange(ANO, .by_group = TRUE) %>%
   mutate(n_acumulado = cumsum(n_alvo)) %>%
   ungroup() %>%
-  ggplot(aes(x = ANO, y = n_acumulado, color = especie_alvo)) +
-  geom_line(linewidth = 1, show.legend = FALSE) +
-  geom_point(size = 2, show.legend = FALSE) +
+  ggplot(aes(x = ANO, y = n_acumulado, fill = especie_alvo)) +
+  geom_line(aes(group = 1), color = "black", linewidth = 1, show.legend = FALSE) +
+  geom_point(shape = 21, color = "black", size = 2, show.legend = FALSE) +
   facet_wrap(~ especie_alvo, ncol = 2) +
-  scale_color_manual(values = species_colors) +
+  scale_fill_manual(values = species_colors) +
   scale_x_continuous(
     breaks = seq(ano_inicio, ano_fim, by = 2),
     expand = expansion(mult = c(0.01, 0.01))
@@ -1200,7 +1216,7 @@ g_estadio_side <- tab_estadio %>%
     ESTADIO = factor(as.character(ESTADIO), levels = rev(estadio_levels))
   ) %>%
   ggplot(aes(x = ESTADIO, y = n, fill = ESTADIO)) +
-  geom_col(color = "black") +
+  geom_col(color = "black", linewidth = 0.6) +
   geom_text(
     aes(label = ifelse(n > 0, as.character(n), "")),
     hjust = -0.1,
@@ -1252,7 +1268,7 @@ g_estadio_ano_side <- tab_estadio_ano %>%
   filter(especie_alvo %in% species_individual) %>%
   mutate(ESTADIO = factor(as.character(ESTADIO), levels = estadio_levels)) %>%
   ggplot(aes(x = ANO, y = n, fill = ESTADIO)) +
-  geom_col(color = "black") +
+  geom_col(color = "black", linewidth = 0.45) +
   facet_wrap(~ especie_alvo, ncol = 2) +
   scale_fill_manual(
     name = "Estágio",
@@ -1318,7 +1334,7 @@ tamanho_long_individual <- dados_alvo %>%
 
 if (nrow(tamanho_long_individual) > 0) {
   
-  x_max_tamanho <- max(tamanho_long_individual$valor, na.rm = TRUE)
+  x_max_tamanho <- limite_superior_eixo_tamanho(tamanho_long_individual$valor, passo = 5)
   
   media_tamanho <- tamanho_long_individual %>%
     group_by(especie_alvo, variavel) %>%
@@ -1331,12 +1347,13 @@ if (nrow(tamanho_long_individual) > 0) {
     )
   
   g_tamanho_hist_side <- tamanho_long_individual %>%
-    ggplot(aes(x = valor)) +
-    geom_histogram(bins = 20, fill = "grey60", color = "black") +
+    ggplot(aes(x = valor, fill = especie_alvo)) +
+    geom_histogram(bins = 20, color = "black", alpha = 0.85, show.legend = FALSE) +
     geom_vline(
       data = media_tamanho,
       aes(xintercept = media),
       inherit.aes = FALSE,
+      color = "black",
       linetype = "dashed",
       linewidth = 0.7
     ) +
@@ -1348,14 +1365,16 @@ if (nrow(tamanho_long_individual) > 0) {
       vjust = 1.3,
       size = 3.1,
       label.size = 0.25,
+      color = "black",
       fill = "white"
     ) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_fill_manual(values = species_colors, guide = "none") +
     scale_x_continuous(
       limits = c(0, x_max_tamanho),
-      breaks = scales::breaks_pretty(n = 10),
+      breaks = seq(0, x_max_tamanho, by = 5),
       labels = label_num_pt(digits = 1),
-      expand = expansion(mult = c(0, 0.02))
+      expand = expansion(mult = c(0.02, 0.04))
     ) +
     labs(
       x = NULL,
@@ -1363,12 +1382,15 @@ if (nrow(tamanho_long_individual) > 0) {
       title = "Distribuição de tamanho das espécies-alvo de tilápia"
     ) +
     tema +
-    tema_sem_grade
+    tema_sem_grade +
+    theme(
+      panel.spacing.x = grid::unit(2, "lines")
+    )
   
   ggsave(
     file.path(comparison_dir, "11_distribuicao_tamanho_lado_a_lado.png"),
     g_tamanho_hist_side,
-    width = 12,
+    width = 13,
     height = 6.5,
     dpi = 300,
     bg = "white"
@@ -1380,7 +1402,7 @@ if (nrow(tamanho_long_individual) > 0) {
   
   if (nrow(tamanho_cp_individual) > 0) {
     
-    x_max_cp_hist <- max(tamanho_cp_individual$valor, na.rm = TRUE)
+    x_max_cp_hist <- limite_superior_eixo_tamanho(tamanho_cp_individual$valor, passo = 5)
     
     media_tamanho_cp <- tamanho_cp_individual %>%
       group_by(especie_alvo, variavel) %>%
@@ -1393,12 +1415,13 @@ if (nrow(tamanho_long_individual) > 0) {
       )
     
     g_tamanho_hist_cp_side <- tamanho_cp_individual %>%
-      ggplot(aes(x = valor)) +
-      geom_histogram(bins = 20, fill = "grey60", color = "black") +
+      ggplot(aes(x = valor, fill = especie_alvo)) +
+      geom_histogram(bins = 20, color = "black", alpha = 0.85, show.legend = FALSE) +
       geom_vline(
         data = media_tamanho_cp,
         aes(xintercept = media),
         inherit.aes = FALSE,
+        color = "black",
         linetype = "dashed",
         linewidth = 0.7
       ) +
@@ -1410,14 +1433,16 @@ if (nrow(tamanho_long_individual) > 0) {
         vjust = 1.3,
         size = 3.1,
         label.size = 0.25,
+        color = "black",
         fill = "white"
       ) +
       facet_grid(variavel ~ especie_alvo, scales = "free_y") +
-      scale_x_continuous(
+      scale_fill_manual(values = species_colors, guide = "none") +
+        scale_x_continuous(
         limits = c(0, x_max_cp_hist),
-        breaks = scales::breaks_pretty(n = 10),
+        breaks = seq(0, x_max_cp_hist, by = 5),
         labels = label_num_pt(digits = 1),
-        expand = expansion(mult = c(0, 0.02))
+        expand = expansion(mult = c(0.02, 0.04))
       ) +
       labs(
         x = "Comprimento padrão (CP)",
@@ -1425,12 +1450,15 @@ if (nrow(tamanho_long_individual) > 0) {
         title = "Distribuição de comprimento padrão das espécies-alvo de tilápia"
       ) +
       tema +
-      tema_sem_grade
+      tema_sem_grade +
+      theme(
+        panel.spacing.x = grid::unit(2, "lines")
+      )
     
     ggsave(
       file.path(comparison_dir, "11b_distribuicao_tamanho_cp_lado_a_lado.png"),
       g_tamanho_hist_cp_side,
-      width = 12,
+      width = 13,
       height = 4.8,
       dpi = 300,
       bg = "white"
@@ -1464,10 +1492,11 @@ tamanho_sexo_individual <- dados_alvo %>%
 if (nrow(tamanho_sexo_individual) > 0) {
   
   g_tamanho_sexo_side <- tamanho_sexo_individual %>%
-    ggplot(aes(x = SEXO, y = valor)) +
-    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
-    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    ggplot(aes(x = SEXO, y = valor, fill = especie_alvo)) +
+    geom_boxplot(color = "black", outlier.shape = NA, alpha = 0.55, show.legend = FALSE) +
+    geom_jitter(color = "black", width = 0.15, alpha = 0.45, size = 1.4, show.legend = FALSE) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_fill_manual(values = species_colors, guide = "none") +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
       labels = label_num_pt(digits = 1)
@@ -1501,17 +1530,16 @@ if (nrow(tamanho_sexo_individual) > 0) {
     )
   
   g_tamanho_sexo_media_side <- tamanho_sexo_individual %>%
-    ggplot(aes(x = SEXO, y = valor)) +
-    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
-    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    ggplot(aes(x = SEXO, y = valor, fill = especie_alvo)) +
+    geom_boxplot(color = "black", outlier.shape = NA, alpha = 0.55, show.legend = FALSE) +
+    geom_jitter(color = "black", width = 0.15, alpha = 0.45, size = 1.4, show.legend = FALSE) +
     geom_point(
       data = media_tamanho_sexo,
-      aes(x = SEXO, y = media),
+      aes(x = SEXO, y = media, fill = especie_alvo),
       inherit.aes = FALSE,
+      color = "black",
       size = 2.5,
-      shape = 23,
-      fill = "white",
-      color = "black"
+      shape = 23
     ) +
     geom_label(
       data = media_tamanho_sexo,
@@ -1520,9 +1548,11 @@ if (nrow(tamanho_sexo_individual) > 0) {
       vjust = -0.65,
       size = 2.7,
       label.size = 0.25,
+      color = "black",
       fill = "white"
     ) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_fill_manual(values = species_colors, guide = "none") +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
       labels = label_num_pt(digits = 1),
@@ -1562,17 +1592,16 @@ if (nrow(tamanho_sexo_individual) > 0) {
       )
     
     g_tamanho_sexo_cp_media_side <- tamanho_sexo_cp_individual %>%
-      ggplot(aes(x = SEXO, y = valor)) +
-      geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
-      geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+      ggplot(aes(x = SEXO, y = valor, fill = especie_alvo)) +
+      geom_boxplot(color = "black", outlier.shape = NA, alpha = 0.55, show.legend = FALSE) +
+      geom_jitter(color = "black", width = 0.15, alpha = 0.45, size = 1.4, show.legend = FALSE) +
       geom_point(
         data = media_tamanho_sexo_cp,
-        aes(x = SEXO, y = media),
+        aes(x = SEXO, y = media, fill = especie_alvo),
         inherit.aes = FALSE,
+        color = "black",
         size = 2.5,
-        shape = 23,
-        fill = "white",
-        color = "black"
+        shape = 23
       ) +
       geom_label(
         data = media_tamanho_sexo_cp,
@@ -1581,10 +1610,12 @@ if (nrow(tamanho_sexo_individual) > 0) {
         vjust = -0.65,
         size = 2.7,
         label.size = 0.25,
+        color = "black",
         fill = "white"
       ) +
       facet_grid(variavel ~ especie_alvo, scales = "free_y") +
-      scale_y_continuous(
+      scale_fill_manual(values = species_colors, guide = "none") +
+        scale_y_continuous(
         breaks = scales::breaks_pretty(n = 8),
         labels = label_num_pt(digits = 1),
         expand = expansion(mult = c(0.05, 0.16))
@@ -1634,10 +1665,11 @@ tamanho_estadio_individual <- dados_alvo %>%
 if (nrow(tamanho_estadio_individual) > 0) {
   
   g_tamanho_estadio_side <- tamanho_estadio_individual %>%
-    ggplot(aes(x = ESTADIO, y = valor)) +
-    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
-    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    ggplot(aes(x = ESTADIO, y = valor, fill = especie_alvo)) +
+    geom_boxplot(color = "black", outlier.shape = NA, alpha = 0.55, show.legend = FALSE) +
+    geom_jitter(color = "black", width = 0.15, alpha = 0.45, size = 1.4, show.legend = FALSE) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_fill_manual(values = species_colors, guide = "none") +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
       labels = label_num_pt(digits = 1)
@@ -1672,17 +1704,16 @@ if (nrow(tamanho_estadio_individual) > 0) {
     )
   
   g_tamanho_estadio_media_side <- tamanho_estadio_individual %>%
-    ggplot(aes(x = ESTADIO, y = valor)) +
-    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
-    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    ggplot(aes(x = ESTADIO, y = valor, fill = especie_alvo)) +
+    geom_boxplot(color = "black", outlier.shape = NA, alpha = 0.55, show.legend = FALSE) +
+    geom_jitter(color = "black", width = 0.15, alpha = 0.45, size = 1.4, show.legend = FALSE) +
     geom_point(
       data = media_tamanho_estadio,
-      aes(x = ESTADIO, y = media),
+      aes(x = ESTADIO, y = media, fill = especie_alvo),
       inherit.aes = FALSE,
+      color = "black",
       size = 2.3,
-      shape = 23,
-      fill = "white",
-      color = "black"
+      shape = 23
     ) +
     geom_label(
       data = media_tamanho_estadio,
@@ -1691,9 +1722,11 @@ if (nrow(tamanho_estadio_individual) > 0) {
       vjust = -0.65,
       size = 2.3,
       label.size = 0.25,
+      color = "black",
       fill = "white"
     ) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_fill_manual(values = species_colors, guide = "none") +
     scale_x_discrete(drop = FALSE) +
     scale_y_continuous(
       breaks = scales::breaks_pretty(n = 8),
@@ -1735,17 +1768,16 @@ if (nrow(tamanho_estadio_individual) > 0) {
       )
     
     g_tamanho_estadio_cp_media_side <- tamanho_estadio_cp_individual %>%
-      ggplot(aes(x = ESTADIO, y = valor)) +
-      geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
-      geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+      ggplot(aes(x = ESTADIO, y = valor, fill = especie_alvo)) +
+      geom_boxplot(color = "black", outlier.shape = NA, alpha = 0.55, show.legend = FALSE) +
+      geom_jitter(color = "black", width = 0.15, alpha = 0.45, size = 1.4, show.legend = FALSE) +
       geom_point(
         data = media_tamanho_estadio_cp,
-        aes(x = ESTADIO, y = media),
+        aes(x = ESTADIO, y = media, fill = especie_alvo),
         inherit.aes = FALSE,
+        color = "black",
         size = 2.3,
-        shape = 23,
-        fill = "white",
-        color = "black"
+        shape = 23
       ) +
       geom_label(
         data = media_tamanho_estadio_cp,
@@ -1754,10 +1786,12 @@ if (nrow(tamanho_estadio_individual) > 0) {
         vjust = -0.65,
         size = 2.3,
         label.size = 0.25,
+        color = "black",
         fill = "white"
       ) +
       facet_grid(variavel ~ especie_alvo, scales = "free_y") +
-      scale_x_discrete(drop = FALSE) +
+      scale_fill_manual(values = species_colors, guide = "none") +
+        scale_x_discrete(drop = FALSE) +
       scale_y_continuous(
         breaks = scales::breaks_pretty(n = 8),
         labels = label_num_pt(digits = 1),
@@ -1796,22 +1830,26 @@ ct_cp_individual <- dados_alvo %>%
 
 if (nrow(ct_cp_individual) > 2) {
   
-  y_max_cp <- max(ct_cp_individual$CP, na.rm = TRUE)
+  x_max_ct <- limite_superior_eixo_tamanho(ct_cp_individual$CT, passo = 5)
+  y_max_cp <- limite_superior_eixo_tamanho(ct_cp_individual$CP, passo = 5)
   
   g_ct_cp_side <- ct_cp_individual %>%
-    ggplot(aes(x = CT, y = CP)) +
-    geom_point(alpha = 0.65, size = 2) +
-    geom_smooth(method = "lm", se = TRUE, color = "black") +
+    ggplot(aes(x = CT, y = CP, fill = especie_alvo)) +
+    geom_point(shape = 21, color = "black", alpha = 0.65, size = 2, show.legend = FALSE) +
+    geom_smooth(aes(fill = especie_alvo), method = "lm", se = TRUE, color = "black", show.legend = FALSE) +
     facet_wrap(~ especie_alvo, ncol = 2, scales = "free_x") +
+    scale_fill_manual(values = species_colors, guide = "none") +
     scale_x_continuous(
-      breaks = scales::breaks_pretty(n = 8),
-      labels = label_num_pt(digits = 1)
+      limits = c(0, x_max_ct),
+      breaks = seq(0, x_max_ct, by = 5),
+      labels = label_num_pt(digits = 1),
+      expand = expansion(mult = c(0.02, 0.04))
     ) +
     scale_y_continuous(
       limits = c(0, y_max_cp),
-      breaks = scales::breaks_pretty(n = 8),
+      breaks = seq(0, y_max_cp, by = 5),
       labels = label_num_pt(digits = 1),
-      expand = expansion(mult = c(0, 0.05))
+      expand = expansion(mult = c(0, 0))
     ) +
     labs(
       x = "Comprimento total (CT)",
@@ -1819,11 +1857,14 @@ if (nrow(ct_cp_individual) > 2) {
       title = "Relação comprimento-comprimento das espécies-alvo de tilápia"
     ) +
     tema +
-    tema_sem_grade
+    tema_sem_grade +
+    theme(
+      panel.spacing.x = grid::unit(2, "lines")
+    )
   
   ggsave(
     file.path(comparison_dir, "14_relacao_ct_cp_lado_a_lado.png"),
-    g_ct_cp_side, width = 12, height = 5.5, dpi = 300,
+    g_ct_cp_side, width = 13, height = 5.5, dpi = 300,
   bg = "white"
   )
 }
