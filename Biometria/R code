@@ -154,6 +154,13 @@ estadio_colors <- c(
   "NÃO INFORMADO"  = "#bdbdbd"   # cinza
 )
 
+# Ordem desejada para os gráficos por zona.
+# Com coord_flip(), usamos a ordem invertida no eixo discreto para que
+# a leitura visual de cima para baixo seja:
+# Fluvial, Transição, Lacustre e Não informado.
+zona_levels_topo_baixo <- c("Fluvial", "Transição", "Lacustre", "Não informado")
+zona_levels_plot <- rev(zona_levels_topo_baixo)
+
 # ======================
 # Formatação numérica em português brasileiro
 # ======================
@@ -752,7 +759,7 @@ tab_zona <- dados %>%
     percentual_alvo = 100 * n_alvo / total_peixes,
     ZONA = factor(
       ZONA,
-      levels = c("Não informado", "Fluvial", "Lacustre", "Transição")
+      levels = zona_levels_topo_baixo
     )
   ) %>%
   arrange(especie_alvo, ZONA)
@@ -1049,16 +1056,30 @@ ggsave(
 g_zona_n_side <- tab_zona %>%
   filter(
     especie_alvo %in% species_individual,
-    !is.na(ZONA),
-    n_alvo > 0
+    !is.na(ZONA)
+  ) %>%
+  mutate(
+    ZONA = factor(as.character(ZONA), levels = zona_levels_plot)
   ) %>%
   ggplot(aes(x = ZONA, y = n_alvo, fill = especie_alvo)) +
   geom_col(color = "black", show.legend = FALSE) +
-  geom_text(aes(label = n_alvo), hjust = -0.15, size = 3.2) +
+  geom_text(
+    aes(label = ifelse(n_alvo > 0, as.character(n_alvo), "")),
+    hjust = -0.15,
+    size = 3.2
+  ) +
   coord_flip() +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_x_discrete(
+    limits = zona_levels_plot,
+    drop = FALSE
+  ) +
   scale_fill_manual(values = species_colors) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  scale_y_continuous(
+    breaks = scales::breaks_pretty(n = 8),
+    labels = label_num_pt(digits = 0),
+    expand = expansion(mult = c(0, 0.18))
+  ) +
   labs(
     x = NULL,
     y = "Número de indivíduos",
@@ -1080,18 +1101,28 @@ ggsave(
 g_zona_rel_side <- tab_zona %>%
   filter(
     especie_alvo %in% species_individual,
-    !is.na(ZONA),
-    percentual_alvo > 0
+    !is.na(ZONA)
+  ) %>%
+  mutate(
+    ZONA = factor(as.character(ZONA), levels = zona_levels_plot)
   ) %>%
   ggplot(aes(x = ZONA, y = percentual_alvo, fill = especie_alvo)) +
   geom_col(color = "black", show.legend = FALSE) +
   geom_text(
-    aes(label = fmt_percent_pt(percentual_alvo, digits = 2, drop0 = FALSE)),
+    aes(label = ifelse(
+      percentual_alvo > 0,
+      fmt_percent_pt(percentual_alvo, digits = 2, drop0 = FALSE),
+      ""
+    )),
     hjust = -0.15,
     size = 3.2
   ) +
   coord_flip() +
-  facet_wrap(~ especie_alvo, ncol = 2, scales = "free_y") +
+  facet_wrap(~ especie_alvo, ncol = 2) +
+  scale_x_discrete(
+    limits = zona_levels_plot,
+    drop = FALSE
+  ) +
   scale_fill_manual(values = species_colors) +
   scale_y_continuous(
     labels = label_percent_pt(digits = 2),
@@ -1289,9 +1320,36 @@ if (nrow(tamanho_long_individual) > 0) {
   
   x_max_tamanho <- max(tamanho_long_individual$valor, na.rm = TRUE)
   
+  media_tamanho <- tamanho_long_individual %>%
+    group_by(especie_alvo, variavel) %>%
+    summarise(
+      media = mean(valor, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      label_media = paste0("Média = ", fmt_num_pt(media, digits = 1), " cm")
+    )
+  
   g_tamanho_hist_side <- tamanho_long_individual %>%
     ggplot(aes(x = valor)) +
     geom_histogram(bins = 20, fill = "grey60", color = "black") +
+    geom_vline(
+      data = media_tamanho,
+      aes(xintercept = media),
+      inherit.aes = FALSE,
+      linetype = "dashed",
+      linewidth = 0.7
+    ) +
+    geom_label(
+      data = media_tamanho,
+      aes(x = Inf, y = Inf, label = label_media),
+      inherit.aes = FALSE,
+      hjust = 1.05,
+      vjust = 1.3,
+      size = 3.1,
+      label.size = 0.25,
+      fill = "white"
+    ) +
     facet_grid(variavel ~ especie_alvo, scales = "free_y") +
     scale_x_continuous(
       limits = c(0, x_max_tamanho),
@@ -1309,9 +1367,75 @@ if (nrow(tamanho_long_individual) > 0) {
   
   ggsave(
     file.path(comparison_dir, "11_distribuicao_tamanho_lado_a_lado.png"),
-    g_tamanho_hist_side, width = 12, height = 6.5, dpi = 300,
-  bg = "white"
+    g_tamanho_hist_side,
+    width = 12,
+    height = 6.5,
+    dpi = 300,
+    bg = "white"
   )
+  
+  # Versão adicional da Figura 11 somente com comprimento padrão (CP), sem CT
+  tamanho_cp_individual <- tamanho_long_individual %>%
+    filter(variavel == "Comprimento padrão (CP)")
+  
+  if (nrow(tamanho_cp_individual) > 0) {
+    
+    x_max_cp_hist <- max(tamanho_cp_individual$valor, na.rm = TRUE)
+    
+    media_tamanho_cp <- tamanho_cp_individual %>%
+      group_by(especie_alvo, variavel) %>%
+      summarise(
+        media = mean(valor, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        label_media = paste0("Média = ", fmt_num_pt(media, digits = 1), " cm")
+      )
+    
+    g_tamanho_hist_cp_side <- tamanho_cp_individual %>%
+      ggplot(aes(x = valor)) +
+      geom_histogram(bins = 20, fill = "grey60", color = "black") +
+      geom_vline(
+        data = media_tamanho_cp,
+        aes(xintercept = media),
+        inherit.aes = FALSE,
+        linetype = "dashed",
+        linewidth = 0.7
+      ) +
+      geom_label(
+        data = media_tamanho_cp,
+        aes(x = Inf, y = Inf, label = label_media),
+        inherit.aes = FALSE,
+        hjust = 1.05,
+        vjust = 1.3,
+        size = 3.1,
+        label.size = 0.25,
+        fill = "white"
+      ) +
+      facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+      scale_x_continuous(
+        limits = c(0, x_max_cp_hist),
+        breaks = scales::breaks_pretty(n = 10),
+        labels = label_num_pt(digits = 1),
+        expand = expansion(mult = c(0, 0.02))
+      ) +
+      labs(
+        x = "Comprimento padrão (CP)",
+        y = "Número de indivíduos",
+        title = "Distribuição de comprimento padrão das espécies-alvo de tilápia"
+      ) +
+      tema +
+      tema_sem_grade
+    
+    ggsave(
+      file.path(comparison_dir, "11b_distribuicao_tamanho_cp_lado_a_lado.png"),
+      g_tamanho_hist_cp_side,
+      width = 12,
+      height = 4.8,
+      dpi = 300,
+      bg = "white"
+    )
+  }
 }
 
 # ----------------------
@@ -1332,7 +1456,8 @@ tamanho_sexo_individual <- dados_alvo %>%
       variavel,
       CT = "Comprimento total (CT)",
       CP = "Comprimento padrão (CP)"
-    )
+    ),
+    SEXO = factor(SEXO, levels = c("Macho", "Fêmea", "Não informado"))
   ) %>%
   filter(!is.na(valor), valor > 0)
 
@@ -1357,9 +1482,130 @@ if (nrow(tamanho_sexo_individual) > 0) {
   
   ggsave(
     file.path(comparison_dir, "12_tamanho_por_sexo_lado_a_lado.png"),
-    g_tamanho_sexo_side, width = 12, height = 6.5, dpi = 300,
-  bg = "white"
+    g_tamanho_sexo_side,
+    width = 12,
+    height = 6.5,
+    dpi = 300,
+    bg = "white"
   )
+  
+  # Figura adicional 12b — Tamanho por sexo com médias, mantendo CT e CP
+  media_tamanho_sexo <- tamanho_sexo_individual %>%
+    group_by(especie_alvo, variavel, SEXO) %>%
+    summarise(
+      media = mean(valor, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      label_media = fmt_num_pt(media, digits = 1)
+    )
+  
+  g_tamanho_sexo_media_side <- tamanho_sexo_individual %>%
+    ggplot(aes(x = SEXO, y = valor)) +
+    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
+    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    geom_point(
+      data = media_tamanho_sexo,
+      aes(x = SEXO, y = media),
+      inherit.aes = FALSE,
+      size = 2.5,
+      shape = 23,
+      fill = "white",
+      color = "black"
+    ) +
+    geom_label(
+      data = media_tamanho_sexo,
+      aes(x = SEXO, y = media, label = label_media),
+      inherit.aes = FALSE,
+      vjust = -0.65,
+      size = 2.7,
+      label.size = 0.25,
+      fill = "white"
+    ) +
+    facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_y_continuous(
+      breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 1),
+      expand = expansion(mult = c(0.05, 0.16))
+    ) +
+    labs(
+      x = "Sexo",
+      y = NULL,
+      title = "Tamanho das espécies-alvo de tilápia por sexo, com médias"
+    ) +
+    tema +
+    tema_sem_grade
+  
+  ggsave(
+    file.path(comparison_dir, "12b_tamanho_por_sexo_com_medias_lado_a_lado.png"),
+    g_tamanho_sexo_media_side,
+    width = 12,
+    height = 6.5,
+    dpi = 300,
+    bg = "white"
+  )
+  
+  # Figura adicional 12c — Tamanho por sexo com médias, somente CP, sem CT
+  tamanho_sexo_cp_individual <- tamanho_sexo_individual %>%
+    filter(variavel == "Comprimento padrão (CP)")
+  
+  if (nrow(tamanho_sexo_cp_individual) > 0) {
+    
+    media_tamanho_sexo_cp <- tamanho_sexo_cp_individual %>%
+      group_by(especie_alvo, variavel, SEXO) %>%
+      summarise(
+        media = mean(valor, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        label_media = fmt_num_pt(media, digits = 1)
+      )
+    
+    g_tamanho_sexo_cp_media_side <- tamanho_sexo_cp_individual %>%
+      ggplot(aes(x = SEXO, y = valor)) +
+      geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
+      geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+      geom_point(
+        data = media_tamanho_sexo_cp,
+        aes(x = SEXO, y = media),
+        inherit.aes = FALSE,
+        size = 2.5,
+        shape = 23,
+        fill = "white",
+        color = "black"
+      ) +
+      geom_label(
+        data = media_tamanho_sexo_cp,
+        aes(x = SEXO, y = media, label = label_media),
+        inherit.aes = FALSE,
+        vjust = -0.65,
+        size = 2.7,
+        label.size = 0.25,
+        fill = "white"
+      ) +
+      facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+      scale_y_continuous(
+        breaks = scales::breaks_pretty(n = 8),
+        labels = label_num_pt(digits = 1),
+        expand = expansion(mult = c(0.05, 0.16))
+      ) +
+      labs(
+        x = "Sexo",
+        y = "Comprimento padrão (CP)",
+        title = "Comprimento padrão das espécies-alvo de tilápia por sexo, com médias"
+      ) +
+      tema +
+      tema_sem_grade
+    
+    ggsave(
+      file.path(comparison_dir, "12c_tamanho_por_sexo_cp_com_medias_lado_a_lado.png"),
+      g_tamanho_sexo_cp_media_side,
+      width = 12,
+      height = 4.8,
+      dpi = 300,
+      bg = "white"
+    )
+  }
 }
 
 # ----------------------
@@ -1368,7 +1614,7 @@ if (nrow(tamanho_sexo_individual) > 0) {
 
 tamanho_estadio_individual <- dados_alvo %>%
   filter(especie_alvo %in% species_individual) %>%
-  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "Não informado", ESTADIO)) %>%
+  mutate(ESTADIO = ifelse(is.na(ESTADIO) | ESTADIO == "", "NÃO INFORMADO", ESTADIO)) %>%
   select(especie_alvo, ESTADIO, CT, CP) %>%
   pivot_longer(
     cols = c(CT, CP),
@@ -1380,7 +1626,8 @@ tamanho_estadio_individual <- dados_alvo %>%
       variavel,
       CT = "Comprimento total (CT)",
       CP = "Comprimento padrão (CP)"
-    )
+    ),
+    ESTADIO = factor(ESTADIO, levels = estadio_levels)
   ) %>%
   filter(!is.na(valor), valor > 0)
 
@@ -1406,9 +1653,134 @@ if (nrow(tamanho_estadio_individual) > 0) {
   
   ggsave(
     file.path(comparison_dir, "13_tamanho_por_estagio_lado_a_lado.png"),
-    g_tamanho_estadio_side, width = 13, height = 6.5, dpi = 300,
-  bg = "white"
+    g_tamanho_estadio_side,
+    width = 13,
+    height = 6.5,
+    dpi = 300,
+    bg = "white"
   )
+  
+  # Figura adicional 13b — Tamanho por estágio reprodutivo com médias, mantendo CT e CP
+  media_tamanho_estadio <- tamanho_estadio_individual %>%
+    group_by(especie_alvo, variavel, ESTADIO) %>%
+    summarise(
+      media = mean(valor, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      label_media = fmt_num_pt(media, digits = 1)
+    )
+  
+  g_tamanho_estadio_media_side <- tamanho_estadio_individual %>%
+    ggplot(aes(x = ESTADIO, y = valor)) +
+    geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
+    geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+    geom_point(
+      data = media_tamanho_estadio,
+      aes(x = ESTADIO, y = media),
+      inherit.aes = FALSE,
+      size = 2.3,
+      shape = 23,
+      fill = "white",
+      color = "black"
+    ) +
+    geom_label(
+      data = media_tamanho_estadio,
+      aes(x = ESTADIO, y = media, label = label_media),
+      inherit.aes = FALSE,
+      vjust = -0.65,
+      size = 2.3,
+      label.size = 0.25,
+      fill = "white"
+    ) +
+    facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(
+      breaks = scales::breaks_pretty(n = 8),
+      labels = label_num_pt(digits = 1),
+      expand = expansion(mult = c(0.05, 0.16))
+    ) +
+    labs(
+      x = "Estágio reprodutivo",
+      y = NULL,
+      title = "Tamanho das espécies-alvo de tilápia por estágio reprodutivo, com médias"
+    ) +
+    tema +
+    tema_sem_grade +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  ggsave(
+    file.path(comparison_dir, "13b_tamanho_por_estagio_com_medias_lado_a_lado.png"),
+    g_tamanho_estadio_media_side,
+    width = 14,
+    height = 6.8,
+    dpi = 300,
+    bg = "white"
+  )
+  
+  # Figura adicional 13c — Tamanho por estágio reprodutivo com médias, somente CP, sem CT
+  tamanho_estadio_cp_individual <- tamanho_estadio_individual %>%
+    filter(variavel == "Comprimento padrão (CP)")
+  
+  if (nrow(tamanho_estadio_cp_individual) > 0) {
+    
+    media_tamanho_estadio_cp <- tamanho_estadio_cp_individual %>%
+      group_by(especie_alvo, variavel, ESTADIO) %>%
+      summarise(
+        media = mean(valor, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        label_media = fmt_num_pt(media, digits = 1)
+      )
+    
+    g_tamanho_estadio_cp_media_side <- tamanho_estadio_cp_individual %>%
+      ggplot(aes(x = ESTADIO, y = valor)) +
+      geom_boxplot(fill = "grey80", color = "black", outlier.shape = NA) +
+      geom_jitter(width = 0.15, alpha = 0.5, size = 1.4) +
+      geom_point(
+        data = media_tamanho_estadio_cp,
+        aes(x = ESTADIO, y = media),
+        inherit.aes = FALSE,
+        size = 2.3,
+        shape = 23,
+        fill = "white",
+        color = "black"
+      ) +
+      geom_label(
+        data = media_tamanho_estadio_cp,
+        aes(x = ESTADIO, y = media, label = label_media),
+        inherit.aes = FALSE,
+        vjust = -0.65,
+        size = 2.3,
+        label.size = 0.25,
+        fill = "white"
+      ) +
+      facet_grid(variavel ~ especie_alvo, scales = "free_y") +
+      scale_x_discrete(drop = FALSE) +
+      scale_y_continuous(
+        breaks = scales::breaks_pretty(n = 8),
+        labels = label_num_pt(digits = 1),
+        expand = expansion(mult = c(0.05, 0.16))
+      ) +
+      labs(
+        x = "Estágio reprodutivo",
+        y = "Comprimento padrão (CP)",
+        title = "Comprimento padrão das espécies-alvo de tilápia por estágio reprodutivo, com médias"
+      ) +
+      tema +
+      tema_sem_grade +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
+    ggsave(
+      file.path(comparison_dir, "13c_tamanho_por_estagio_cp_com_medias_lado_a_lado.png"),
+      g_tamanho_estadio_cp_media_side,
+      width = 14,
+      height = 5.2,
+      dpi = 300,
+      bg = "white"
+    )
+  }
 }
 
 # ----------------------
